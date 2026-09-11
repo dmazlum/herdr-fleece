@@ -19,7 +19,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test \"dist/**/*.test.js\""
+    "test": "npm run build && env -u NO_COLOR node --test $(find dist -name '*.test.js')"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
