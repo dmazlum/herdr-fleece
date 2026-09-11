@@ -1,0 +1,25 @@
+name: Release
+
+# A pushed vX.Y.Z tag becomes a GitHub Release. Fleece itself is installed from
+# git (`herdr plugin install dmazlum/herdr-fleece`); this is the changelog users
+# see on the Releases page, not a binary pipeline.
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag

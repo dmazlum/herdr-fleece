@@ -1,0 +1,20 @@
+name: Feature request
+description: A change you want in Fleece
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: want
+    attributes:
+      label: What should Fleece do?
+      description: The behavior you want, and when you would use it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: now
+    attributes:
+      label: What happens today?
+      description: The closest existing action (`frame`, `dock`, `copy`, `save`, `journal`) and why it is not enough.
+    validations:
+      required: false

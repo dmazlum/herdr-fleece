@@ -1,18 +1,40 @@
 name: CI
 
 on:
+  pull_request:
   push:
     branches: [main]
-  pull_request:
+
+# A new push to a PR supersedes the old run — don't burn a runner on the stale one.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
-  test:
+  check:
+    name: typecheck + tests
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
-      - run: npm test
+      - name: Versions agree
+        run: |
+          pkg=$(node --input-type=commonjs -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).version")
+          toml=$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' herdr-plugin.toml | head -n1)
+          echo "package.json=$pkg herdr-plugin.toml=$toml"
+          test -n "$pkg" && test "$pkg" = "$toml"
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Test
+        run: npm test

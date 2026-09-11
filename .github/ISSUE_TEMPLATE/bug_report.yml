@@ -1,0 +1,63 @@
+name: Bug report
+description: Something in Fleece is broken
+labels:
+  - bug
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, and what did you expect?
+      description: Describe the bug. Include steps to reproduce if you have them.
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor-output
+    attributes:
+      label: Output of `fleece doctor`
+      description: >
+        Run the `fleece.doctor` action in Herdr, or `node dist/cli.js doctor`
+        after `npm run build`. Paste the whole block. It contains no secrets.
+      render: shell
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How is Fleece installed?
+      options:
+        - herdr plugin install dmazlum/herdr-fleece
+        - herdr plugin link (local clone)
+        - other
+    validations:
+      required: true
+
+  - type: input
+    id: versions
+    attributes:
+      label: Herdr and Fleece versions
+      description: "Example: Herdr 0.8.2, Fleece 0.1.0"
+      placeholder: Herdr x.y.z, Fleece x.y.z
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options:
+        - macOS
+        - Linux
+        - other
+    validations:
+      required: true
+
+  - type: textarea
+    id: install-output
+    attributes:
+      label: If this is an install or link problem
+      description: Paste the full output of `herdr plugin install` or `herdr plugin link`.
+      render: shell
+    validations:
+      required: false
