@@ -1,0 +1,28 @@
+{
+  "name": "herdr-fleece",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Frame your agent's last answer in Herdr, then copy, save or share it.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dmazlum/herdr-fleece.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dmazlum/herdr-fleece/issues"
+  },
+  "homepage": "https://github.com/dmazlum/herdr-fleece#readme",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test \"dist/**/*.test.js\""
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}

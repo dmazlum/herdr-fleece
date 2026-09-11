@@ -1,0 +1,59 @@
+id = "fleece"
+name = "Fleece"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "Frame your agent's last answer, then copy, save or share it."
+platforms = ["macos", "linux"]
+
+[[build]]
+command = ["npm", "ci"]
+
+[[build]]
+command = ["npm", "run", "build"]
+
+[[actions]]
+id = "frame"
+title = "Frame last answer"
+command = ["node", "dist/cli.js", "frame"]
+
+[[actions]]
+id = "dock"
+title = "Toggle Fleece dock"
+command = ["node", "dist/cli.js", "dock"]
+
+[[actions]]
+id = "copy"
+title = "Copy last answer"
+command = ["node", "dist/cli.js", "copy"]
+
+[[actions]]
+id = "copy-code"
+title = "Copy code blocks from last answer"
+command = ["node", "dist/cli.js", "copy", "--code"]
+
+[[actions]]
+id = "save"
+title = "Save last answer as Markdown"
+command = ["node", "dist/cli.js", "save"]
+
+[[actions]]
+id = "journal"
+title = "Journal every answer in this session"
+command = ["node", "dist/cli.js", "journal"]
+
+[[actions]]
+id = "doctor"
+title = "Diagnose Fleece"
+command = ["node", "dist/cli.js", "doctor"]
+
+[[panes]]
+id = "frame"
+title = "Fleece"
+placement = "overlay"
+command = ["node", "dist/ui.js"]
+
+[[panes]]
+id = "dock"
+title = "Fleece"
+placement = "split"
+command = ["node", "dist/dock.js"]
