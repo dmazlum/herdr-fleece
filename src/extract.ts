@@ -23,6 +23,8 @@ export interface Item {
   tag?: string;
   /** Right-aligned detail, e.g. "12 ln". */
   detail?: string;
+  /** What the open key hands to the system: an absolute path or a URL. */
+  open?: string;
   turn: number;
 }
 
@@ -135,6 +137,7 @@ function collectFiles(scope: Scope, add: (item: Item) => void): void {
       label: relative(path, scope.base),
       text: path,
       detail: file.edits > 1 ? `×${file.edits}` : undefined,
+      open: path,
       turn: scope.turn.index,
     });
   }
@@ -190,7 +193,7 @@ function collectInline(scope: Scope, add: (item: Item) => void): void {
         const path = scope.resolve(text);
         // A file the agent edited is already listed above, under its own name.
         if (path === null || scope.edited.has(path) || !scope.exists(path)) continue;
-        add({ kind: "path", label: text, text, turn: turn.index });
+        add({ kind: "path", label: text, text, open: path, turn: turn.index });
       } else if (isCommand(text)) {
         add({ kind: "command", label: text, text, turn: turn.index });
       }
@@ -202,7 +205,13 @@ function collectLinks(turn: Turn, add: (item: Item) => void): void {
   const matches = turn.text.match(/https?:\/\/[^\s)<>"'\]]+/g) ?? [];
   for (const match of matches) {
     const url = match.replace(/[.,;:]+$/, "");
-    add({ kind: "link", label: url.replace(/^https?:\/\//, ""), text: url, turn: turn.index });
+    add({
+      kind: "link",
+      label: url.replace(/^https?:\/\//, ""),
+      text: url,
+      open: url,
+      turn: turn.index,
+    });
   }
 }
 

@@ -5,6 +5,7 @@ import { fingerprint } from "./build.js";
 import { loadConfig } from "./config.js";
 import { claimDock, releaseDock, writeFramePayload } from "./dockstate.js";
 import { copyToClipboard } from "./export/clipboard.js";
+import { launch, openArgs } from "./export/opener.js";
 import { saveMarkdown } from "./export/markdown.js";
 import { extractItems, type Item } from "./extract.js";
 import {
@@ -66,8 +67,11 @@ const statusLine = new StatusLine(() => draw());
  * came from is as often a shell, so this tracks focus separately.
  */
 let lastFocused = "";
-/** True between pressing `s` and choosing the item it should send. */
-let awaitingSend = false;
+/**
+ * Set between pressing `s` or `e` and choosing the item it should act on, so
+ * the next key names an item rather than a command.
+ */
+let armed: "send" | "open" | null = null;
 /**
  * The newest answered turn the panel is showing, by its own index, or null to
  * follow the session. Pinning by index rather than by a distance from the end
@@ -355,15 +359,14 @@ async function onKey(key: string): Promise<void> {
   statusLine.clear();
   let message: string | undefined;
 
-  // The send key arms a pick, so the next key names an item, not a command.
-  if (awaitingSend) {
-    awaitingSend = false;
-    if (key === KEY.ESCAPE || key === KEY.CTRL_C) {
-      message = "send cancelled";
-    } else {
-      const item = keyMap(items, keys).get(key);
-      message = item ? await send(item) : "send cancelled";
-    }
+  // The send and open keys arm a pick, so the next key names an item, not a command.
+  if (armed !== null) {
+    const action = armed;
+    armed = null;
+    const item =
+      key === KEY.ESCAPE || key === KEY.CTRL_C ? undefined : keyMap(items, keys).get(key);
+    if (!item) message = `${action} cancelled`;
+    else message = action === "send" ? await send(item) : await open(item);
     statusLine.show(message);
     draw();
     return;
@@ -390,6 +393,8 @@ async function onKey(key: string): Promise<void> {
     journalNote = undefined;
   } else if (key === keys.send) {
     message = arm();
+  } else if (key === keys.open) {
+    message = armOpen();
   } else if (key === keys.older) {
     message = step(-1);
   } else if (key === keys.newer) {
@@ -405,8 +410,8 @@ async function onKey(key: string): Promise<void> {
     if (item) message = await copy(item);
   }
 
-  // An armed send is a question, not a receipt: it waits rather than expiring.
-  if (message !== undefined && awaitingSend) statusLine.hold(message);
+  // An armed pick is a question, not a receipt: it waits rather than expiring.
+  if (message !== undefined && armed !== null) statusLine.hold(message);
   else statusLine.show(message);
 
   draw();
@@ -451,8 +456,32 @@ function arm(): string {
   if (items.length === 0) return "nothing to send";
   const where = destination();
   if (where === "") return "no pane to send to";
-  awaitingSend = true;
+  armed = "send";
   return `send → ${where} · pick an item, esc cancels`;
+}
+
+function armOpen(): string {
+  if (!items.some((item) => item.open !== undefined)) return "nothing to open";
+  armed = "open";
+  return "open · pick an item, esc cancels";
+}
+
+/**
+ * Hands a file, path or link to the desktop. Code and commands have nothing to
+ * open, so picking one says so instead of guessing at a temp file.
+ */
+async function open(item: Item): Promise<string> {
+  if (item.open === undefined) return `a ${item.kind} cannot be opened`;
+
+  const argv = openArgs(item.open, { link: item.kind === "link", command: config.openCommand });
+  if (!argv) return `no opener on ${process.platform}`;
+
+  try {
+    await launch(argv);
+  } catch {
+    return `could not run ${argv[0]}`;
+  }
+  return `opened ${item.kind} · ${argv[0]}`;
 }
 
 /**

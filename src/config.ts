@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { parseCommand } from "./export/opener.js";
 import { DEFAULT_KEYS, type KeyBindings, resolveKeys } from "./keys.js";
 import { parseToml, type TomlScalar, type TomlTable } from "./toml.js";
 
@@ -22,6 +23,11 @@ export interface FleeceConfig {
   dockTurns: number;
   /** Columns the dock aims for when it opens. */
   dockWidth: number;
+  /**
+   * What the dock opens files and directories with, as argv. Unset means the
+   * system opener (`open`, `xdg-open`). Links always use the system opener.
+   */
+  openCommand?: string[];
   /** Dock command bindings, from the `[keys]` table. */
   keys: KeyBindings;
   /** Bindings that were ignored, for `fleece doctor` to explain. */
@@ -69,6 +75,7 @@ export function loadConfig(): FleeceConfig {
     journal: bool(table, "journal") ?? DEFAULTS.journal,
     dockTurns: Math.max(1, int(table, "dock_turns") ?? DEFAULTS.dockTurns),
     dockWidth: Math.max(24, int(table, "dock_width") ?? DEFAULTS.dockWidth),
+    openCommand: parseCommand(str(table, "open_command")),
   };
 }
 

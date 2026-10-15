@@ -54,7 +54,7 @@ export function renderPanel(items: Item[], options: PanelOptions): string {
   const width = Math.max(24, options.width);
   const inner = width - 2;
   const textWidth = inner - 2;
-  const body = items.length === 0 ? [dim("nothing to take away yet")] : listLines(items, textWidth);
+  const body = items.length === 0 ? [dim("nothing to take away yet")] : listLines(items, textWidth, options.keys);
 
   const visible = options.height ? Math.max(1, options.height - PANEL_CHROME_ROWS) : body.length;
   const maxScroll = Math.max(0, body.length - visible);
@@ -72,9 +72,13 @@ export function renderPanel(items: Item[], options: PanelOptions): string {
   return lines.join("\n");
 }
 
-export function listLines(items: Item[], width: number): string[] {
+export function listLines(
+  items: Item[],
+  width: number,
+  keys: KeyBindings = DEFAULT_KEYS,
+): string[] {
   const byItem = new Map<Item, string>();
-  for (const [key, item] of keyMap(items)) byItem.set(item, key);
+  for (const [key, item] of keyMap(items, keys)) byItem.set(item, key);
 
   const out: string[] = [];
   for (const section of SECTIONS) {

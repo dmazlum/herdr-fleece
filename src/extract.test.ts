@@ -252,3 +252,22 @@ test("a command shown with its result is not runnable", () => {
   assert.ok(!isCommand("herdr plugin list …"));
   assert.ok(isCommand("herdr server reload-config"));
 });
+
+test("files, paths and links say what the open key should hand over", () => {
+  const items = extractItems(
+    [edited("Touched `src/b.ts`, see https://a.test/docs and run `npm ci`.", [
+      { path: "src/a.ts", edits: 1 },
+    ])],
+    { exists: () => true },
+  );
+
+  assert.deepEqual(
+    items.map((item) => [item.kind, item.open]),
+    [
+      ["file", "/repo/src/a.ts"],
+      ["command", undefined],
+      ["path", "/repo/src/b.ts"],
+      ["link", "https://a.test/docs"],
+    ],
+  );
+});

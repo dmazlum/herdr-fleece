@@ -15,7 +15,8 @@ supported yet.
 - **Frame.** Overlay the last answer on demand. `q` closes it. Copy, copy-code, or save
   without taking space from the agent pane.
 - **Dock.** A narrow pane that lists files the agent edited, plus code, commands, paths,
-  and links from the last few turns. One keystroke copies; `s` then a key sends.
+  and links from the last few turns. One keystroke copies; `s` then a key sends; `e` then
+  a key opens a file, path, or link.
 - **Journal.** Optionally write every answer to disk as Markdown as it lands.
 - **Clipboard.** Local tools (`pbcopy`, `wl-copy`, `xclip`, `xsel`) and OSC 52 over SSH.
 
@@ -90,7 +91,7 @@ list is not enough.
 │ LINKS                                   │
 │  5 herdr.dev/docs/socket-api/           │
 ├─────────────────────────────────────────┤
-│ key copy · s send             wC:p1 · live │
+│ key copy · s send · e open         live │
 │ y all · m save · [ ] turn · q close     │
 └─────────────────────────────────────────┘
 ```
@@ -111,6 +112,7 @@ window. A new turn does not move a window you have paged away from.
 | --- | --- |
 | `1`–`9`, leftover letters | Copy that item |
 | `s` then an item key | Send to the pane you came from (Esc cancels) |
+| `e` then an item key | Open a file, path, or link (Esc cancels) |
 | `y` | Copy the whole answer |
 | `m` | Save as Markdown |
 | `o` | Open the frame |
@@ -118,6 +120,10 @@ window. A new turn does not move a window you have paged away from.
 | `r` | Reload |
 | `j`/`k` | Scroll |
 | `q`, `Esc` | Close |
+
+Open hands files and directories to the system opener (`open` on macOS, `xdg-open` on
+Linux), or to `open_command` if set. Links always go to the default browser. Code and
+commands have nothing to open.
 
 Send uses a bracketed paste and never presses Enter. Control bytes are stripped so a
 payload cannot break the paste wrap.
@@ -156,6 +162,7 @@ front_matter     = true
 journal          = false
 dock_turns       = 3
 dock_width       = 46
+open_command     = "code -r"   # optional; files and paths only
 
 [keys]
 close       = "q"
@@ -166,6 +173,7 @@ top         = "g"
 bottom      = "G"
 reload      = "r"
 send        = "s"
+open        = "e"
 older       = "["
 newer       = "]"
 frame       = "o"

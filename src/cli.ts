@@ -2,6 +2,7 @@ import { configPath, loadConfig, type FleeceConfig } from "./config.js";
 import { copyToClipboard } from "./export/clipboard.js";
 import { codeOnly } from "./export/code.js";
 import { buildMarkdown, saveMarkdown } from "./export/markdown.js";
+import { systemOpener } from "./export/opener.js";
 import { readDockState, writeFramePayload } from "./dockstate.js";
 import {
   notify,
@@ -192,6 +193,9 @@ async function doctor(flags: Flags): Promise<void> {
   lines.push(`export dir       ${config.exportDir}`);
   lines.push(`claude projects  ${claudeProjectsDir()}`);
   lines.push(`dock keys        ${bindings(config)}`);
+  lines.push(
+    `open with        ${config.openCommand?.join(" ") ?? systemOpener() ?? "(no system opener)"}`,
+  );
   for (const problem of config.keyProblems) lines.push(`  keys            IGNORED: ${problem}`);
 
   try {

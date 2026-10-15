@@ -55,7 +55,7 @@ test("binding two commands to one key is reported rather than silently resolved"
 test("the hints are generated from the bindings, so they cannot lie", () => {
   const [top, bottom] = hintLines(resolveKeys({ send: "x", save: "w" }).keys, [80, 80]);
 
-  assert.equal(top, "key copy · x send");
+  assert.equal(top, "key copy · x send · e open");
   assert.equal(bottom, "y all · w save · o frame · [ ] turn · r reload · q close");
 });
 
