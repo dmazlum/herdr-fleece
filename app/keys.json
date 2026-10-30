@@ -1,0 +1,6 @@
+{
+  "global": {
+    "cmd-shift-f": "mod.open:fleece",
+    "cmd-shift-y": "fleece.copy"
+  }
+}

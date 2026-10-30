@@ -1,6 +1,6 @@
 {
   "name": "herdr-fleece",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "Frame your agent's last answer in Herdr, then copy, save or share it.",
@@ -17,12 +17,14 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && npm run build:mod",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && env -u NO_COLOR node --test $(find dist -name '*.test.js')"
+    "test": "npm run build && env -u NO_COLOR node --test $(find dist -name '*.test.js')",
+    "build:mod": "esbuild src/engine.ts --bundle --platform=node --format=esm --target=node20 --legal-comments=none --outfile=app/mods/fleece/engine.mjs --log-level=warning"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "esbuild": "^0.25.10",
     "typescript": "^5.7.2"
   }
 }

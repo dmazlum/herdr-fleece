@@ -20,6 +20,34 @@ supported yet.
 - **Journal.** Optionally write every answer to disk as Markdown as it lands.
 - **Clipboard.** Local tools (`pbcopy`, `wl-copy`, `xclip`, `xsel`) and OSC 52 over SSH.
 
+## Herdr app
+
+The [Herdr desktop app](https://herdr.dev) does not run Herdr plugins. It has mods
+instead, and Fleece ships one in [`app/`](app/): the same dock and frame, drawn natively.
+The transcript parsing is the same code, bundled into `app/mods/fleece/engine.mjs` and run
+with your Node.
+
+```sh
+git clone https://github.com/dmazlum/herdr-fleece
+cp -R herdr-fleece/app/mods/fleece ~/.config/herdr-app/mods/
+herdr-app check ~/.config/herdr-app/mods/fleece
+```
+
+Then merge [`app/keys.json`](app/keys.json) into `~/.config/herdr-app/keys.json`:
+
+| Key / command | What it does |
+| --- | --- |
+| `cmd-shift-f` → `mod.open:fleece` | Frame the focused agent's last answer |
+| `d` in the frame | Dock Fleece beside that agent |
+| `herdr-app do pane.split --direction right --mod fleece` | The same dock, from a shell |
+| `cmd-shift-y` → `fleece.copy` | Copy the last answer (with a dock shown) |
+
+In the dock, click a row to copy it. Its keys match the plugin's (item key, `s`, `e`, `y`,
+`m`, `o`, `[`/`]`, `r`). The frame takes `y`, `c`, `m`, `d`, `[`/`]` and Esc. Configuration
+is read from `~/.config/fleece/config.toml` (or `$FLEECE_CONFIG_DIR`), with the same keys
+as below. Only Claude Code agents on this machine are supported. [`app/RECIPE.md`](app/RECIPE.md)
+covers the details.
+
 ## Install
 
 ```sh
