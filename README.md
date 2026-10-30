@@ -29,7 +29,7 @@ with your Node.
 
 ```sh
 git clone https://github.com/dmazlum/herdr-fleece
-cp -R herdr-fleece/app/mods/fleece ~/.config/herdr-app/mods/
+cp -R herdr-fleece/app/mods/fleece herdr-fleece/app/mods/fleece-dock ~/.config/herdr-app/mods/
 herdr-app check ~/.config/herdr-app/mods/fleece
 ```
 
@@ -38,6 +38,7 @@ Then merge [`app/keys.json`](app/keys.json) into `~/.config/herdr-app/keys.json`
 | Key / command | What it does |
 | --- | --- |
 | `cmd-shift-f` → `mod.open:fleece` | Frame the focused agent's last answer |
+| `cmd-alt-f` → `mod.open:fleece-dock` | Toggle the dock beside the focused agent |
 | `d` in the frame | Dock Fleece beside that agent |
 | `herdr-app do pane.split --direction right --mod fleece` | The same dock, from a shell |
 | `cmd-shift-y` → `fleece.copy` | Copy the last answer (with a dock shown) |
