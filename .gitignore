@@ -8,3 +8,6 @@ CLAUDE.md
 .env
 .env.*
 !.env.example
+# Written by herdr-app on check/load
+app/mods/*/gpui-kit.d.ts
+app/mods/*/jsconfig.json

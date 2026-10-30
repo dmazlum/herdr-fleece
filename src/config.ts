@@ -46,13 +46,20 @@ const DEFAULTS: FleeceConfig = {
   keyProblems: [],
 };
 
-export function configPath(): string | null {
-  const dir = process.env.HERDR_PLUGIN_CONFIG_DIR;
+/**
+ * The Herdr plugin gets its directory from Herdr. The desktop app mod has no
+ * such context, so it reads `FLEECE_CONFIG_DIR` or `~/.config/fleece`.
+ */
+export function configPath(app = false): string | null {
+  const dir =
+    process.env.HERDR_PLUGIN_CONFIG_DIR ??
+    process.env.FLEECE_CONFIG_DIR ??
+    (app ? join(homedir(), ".config", "fleece") : undefined);
   return dir ? join(dir, "config.toml") : null;
 }
 
-export function loadConfig(): FleeceConfig {
-  const path = configPath();
+export function loadConfig(app = false): FleeceConfig {
+  const path = configPath(app);
   if (!path) return { ...DEFAULTS };
 
   let table: TomlTable;

@@ -38,3 +38,5 @@ jobs:
         run: npm run typecheck
       - name: Test
         run: npm test
+      - name: Mod engine is up to date
+        run: git diff --exit-code app/mods/fleece/engine.mjs
