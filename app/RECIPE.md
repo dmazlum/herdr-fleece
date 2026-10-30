@@ -54,6 +54,10 @@ screen.
 - `mods/fleece/main.js` is one `View` with two shapes. `props().overlay` set means the
   frame; otherwise it's the dock. The frame takes `props().terminal` and `props().pin`
   from the dock, or the focused agent when it's opened with `mod.open:fleece`.
+- `mods/fleece-dock/main.js` toggles the dock (`mod.open:fleece-dock`, bound to `cmd-alt-f`).
+  A key can only run a command, and a closed dock has no copy to receive one, so it opens
+  as a 2×2 frameless popup, closes the tab's `fleece` panes or splits one right of the
+  agent's pane, refocuses the agent and closes itself.
 - `mods/fleece/engine.mjs` is a bundled Node script (Node 20+). The mod runs it with
   `exec("node", [appHome() + "/mods/fleece/engine.mjs", ...])` and reads one JSON line
   back. Its commands are `state`, `copy`, `clip`, `save`, `journal`, `open` and `doctor`,

@@ -1,6 +1,7 @@
 {
   "global": {
     "cmd-shift-f": "mod.open:fleece",
+    "cmd-alt-f": "mod.open:fleece-dock",
     "cmd-shift-y": "fleece.copy"
   }
 }
