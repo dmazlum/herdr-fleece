@@ -176,14 +176,27 @@ export default class Fleece extends View {
     const k = this.keys();
     const items = this.data?.items ?? [];
     const item = items.find((i) => i.key === key);
-    const text = key === k["copy-answer"] ? this.data?.turn?.text : item?.text;
+    if (key === k["copy-answer"]) this.relayStart(this.data?.turn?.text, "answer", cx);
+    else if (item) this.relayStart(item.text, item.kind, cx);
+  }
+
+  // Asks which agent, unless only one is left. Shared by the keys, a row's
+  // relay button and the frame. The number keys must reach this view, and a
+  // button keeps the click to itself, so the view takes focus here.
+  relayStart(text, what, cx) {
     if (!text) return;
-    const what = key === k["copy-answer"] ? "answer" : item.kind;
     const targets = relayTargets(this.address);
     if (targets.length === 0) return notify({ title: "Fleece", body: "no other agent to relay to", level: "warning" });
     this.relaying = { text, what, targets };
     if (targets.length === 1) return this.relayTo("1", cx);
     this.armed = "relay-to";
+    this.handle.focus();
+    cx.notify();
+  }
+
+  relayHint() {
+    const list = (this.relaying?.targets ?? []).map((x, n) => `${n + 1} ${x.label}`).join(" · ");
+    return `relay ${this.relaying?.what ?? ""} → ${list} · Esc cancels`;
   }
 
   // Step two: which agent. Pasted like send, never submitted.
@@ -192,9 +205,12 @@ export default class Fleece extends View {
     this.relaying = null;
     const target = /^[1-9]$/.test(key) ? pending?.targets[Number(key) - 1] : null;
     if (!target) return;
+    const overlay = this.frame ? props().overlay : null;
     cx.spawn(async (cx) => {
       const reply = await engine(["clip", "--text", pending.text]);
       if (!reply.ok) return toast(reply);
+      // The frame is a dialog over the app; close it so the paste lands in the terminal.
+      if (overlay) closeOverlay(overlay);
       run("pane.focus", { terminal: target.address });
       run("terminal.paste");
       notify({ title: "Fleece", body: `relayed ${pending.what} → ${target.label}`, level: "success", timeout: 2500 });
@@ -244,6 +260,7 @@ export default class Fleece extends View {
     if (key === k.reload) return this.load(cx);
     if (this.frame) {
       if (key === "c") return this.act(["copy", "--code", ...this.turnArgs()], cx);
+      if (key === k.relay) return this.relayStart(this.data?.turn?.text, "answer", cx);
       if (key === "d") return this.openDock();
       if (key === k.close) return closeOverlay(props().overlay);
       return;
@@ -299,7 +316,7 @@ export default class Fleece extends View {
         .children(rows.map((item, n) => this.row(item, `${title}-${n}`, t, mono)))));
 
     const hint = this.armed === "relay-to"
-      ? `relay ${this.relaying?.what ?? ""} → ${(this.relaying?.targets ?? []).map((x, n) => `${n + 1} ${x.label}`).join(" · ")} · Esc cancels`
+      ? this.relayHint()
       : this.armed === "relay"
         ? `relay — press an item key or ${k["copy-answer"]} for the answer · Esc cancels`
         : this.armed
@@ -329,6 +346,7 @@ export default class Fleece extends View {
       .child(div().flex_1().min_w(0).truncate().when(code, (el) => el.font_family(mono).text_size(11.5)).child(item.label))
       .when(Boolean(item.detail), (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(item.detail)))
       .child(this.button(`send-${id}`, "send", t, (cx) => this.sendItem(item, cx)))
+      .child(this.button(`relay-${id}`, "relay", t, (cx) => this.relayStart(item.text, item.kind, cx)))
       .when(Boolean(item.open), (el) => el.child(this.button(`open-${id}`, "open", t, (cx) => this.openItem(item, cx))));
   }
 
@@ -350,9 +368,12 @@ export default class Fleece extends View {
         .when(Boolean(turn.prompt), (el) => el.child(div().text_size(11.5).text_color(t.muted).truncate().child(`› ${turn.prompt.split("\n")[0]}`))))
       .child(div().id("fleece-answer").flex_1().min_h(0).overflow_y_scrollbar().px(18).py(12)
         .child(TextView.markdown(`fleece-md-${turn.index}`, turn.text).selectable(true)))
+      .when(this.armed === "relay-to", (el) => el.child(div().flex_none().px(18).py(6).border_t_1().border_color(t.border)
+        .text_size(11).text_color(t.accent).truncate().child(this.relayHint())))
       .child(h_flex().flex_none().h(34).px(12).gap(2).items_center().border_t_1().border_color(t.border)
         .child(this.button("x-copy", `${k["copy-answer"]} Copy`, t, (cx) => this.act(["copy", ...this.turnArgs()], cx)))
         .child(this.button("x-code", "c Copy code", t, (cx) => this.act(["copy", "--code", ...this.turnArgs()], cx)))
+        .child(this.button("x-relay", `${k.relay} Relay`, t, (cx) => this.relayStart(turn.text, "answer", cx)))
         .child(this.button("x-save", `${k.save} Save`, t, (cx) => this.act(["save", ...this.turnArgs()], cx)))
         .child(this.button("x-dock", "d Dock", t, () => this.openDock()))
         .child(div().flex_1())

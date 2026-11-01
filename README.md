@@ -42,11 +42,12 @@ Then merge [`app/keys.json`](app/keys.json) into `~/.config/herdr-app/keys.json`
 | `herdr-app do pane.split --direction right --mod fleece` | The same dock, from a shell |
 | `cmd-shift-y` → `fleece.copy` | Copy the last answer (with a dock shown) |
 
-In the dock, click a row to copy it. Its keys match the plugin's (item key, `s`, `t`, `e`, `y`,
-`m`, `o`, `[`/`]`, `r`). The frame takes `y`, `c`, `m`, `d`, `[`/`]` and Esc. Configuration
-is read from `~/.config/fleece/config.toml` (or `$FLEECE_CONFIG_DIR`), with the same keys
-as below. Claude Code and Codex agents on this machine are supported. [`app/RECIPE.md`](app/RECIPE.md)
-covers the details.
+In the dock, click a row to copy it, or use its send and relay buttons. Its keys match
+the plugin's (item key, `s`, `t`, `e`, `y`, `m`, `o`, `[`/`]`, `r`). The frame takes `y`,
+`c`, `t` (relay the answer), `m`, `d`, `[`/`]` and Esc. Configuration is read from
+`~/.config/fleece/config.toml` (or `$FLEECE_CONFIG_DIR`), with the same keys as below.
+Claude Code and Codex agents on this machine are supported.
+[`app/RECIPE.md`](app/RECIPE.md) covers the details.
 
 ## Agents
 

@@ -46,7 +46,9 @@ screen.
   never presses Enter.
 - **Relay** does the same into another agent, picked by number from `agents()`, nearest
   first (same tab, same space, the rest), at most nine. Focus moves to that agent, so the
-  dock follows it.
+  dock follows it. Each row has a relay button too, and in the frame `t` (or the Relay
+  button) relays the whole answer; the frame closes first so the paste reaches the
+  terminal.
 - **Open** passes files and paths to `open`/`xdg-open`, or to `open_command`. Links
   always go to the browser.
 - Paging back pins the window to that answer, so a new turn doesn't move it. Stepping
