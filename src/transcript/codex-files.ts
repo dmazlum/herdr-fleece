@@ -1,6 +1,7 @@
 import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { isSubagentSource } from "./codex.js";
 
 /**
  * Codex writes one rollout per session at
@@ -49,8 +50,10 @@ export function findCodexTranscript(sessionId: string): string | null {
   return null;
 }
 
-/** How many recently written rollouts {@link newestCodexTranscript} opens before giving up. */
+/** How many recent top-level rollouts {@link newestCodexTranscript} checks before giving up. */
 const NEWEST_SCAN_LIMIT = 200;
+/** A bound on all rollouts opened, subagent ones included, so a busy reviewer cannot stall it. */
+const NEWEST_OPEN_LIMIT = 1000;
 
 /**
  * Without a session id, the most recently written rollout of a top-level
@@ -73,9 +76,14 @@ export function newestCodexTranscript(cwd: string): string | undefined {
   }
   candidates.sort((left, right) => right.mtime - left.mtime);
 
-  for (const { path } of candidates.slice(0, NEWEST_SCAN_LIMIT)) {
+  // Ordered by last write, not by folder: a resumed session keeps writing to
+  // the folder of the day it started, so stopping at the newest day would miss it.
+  let topLevel = 0;
+  for (const { path } of candidates.slice(0, NEWEST_OPEN_LIMIT)) {
     const meta = sessionMeta(path);
-    if (meta && meta.cwd === cwd && !meta.subagent) return path;
+    if (!meta || meta.subagent) continue;
+    if (meta.cwd === cwd) return path;
+    if (++topLevel >= NEWEST_SCAN_LIMIT) break;
   }
   return undefined;
 }
@@ -108,30 +116,62 @@ function list(dir: string): string[] {
   }
 }
 
-/** The first line of a rollout carries the base instructions, so it can run long. */
-const META_MAX_BYTES = 1024 * 1024;
+/**
+ * How much of a rollout {@link sessionMeta} reads. The first record carries
+ * the base instructions and can run long, but `cwd` and `source` come before
+ * them, so a prefix is enough.
+ */
+const META_HEAD_BYTES = 64 * 1024;
 
 /** The `session_meta` record a rollout opens with: where it ran and whether a subagent wrote it. */
 export function sessionMeta(path: string): { cwd?: string; subagent: boolean } | undefined {
-  const line = firstLine(path);
-  if (line === undefined) return undefined;
-  try {
-    const record = JSON.parse(line) as { type?: string; payload?: Record<string, unknown> };
-    if (record.type !== "session_meta" || typeof record.payload !== "object" || !record.payload) {
+  const head = readHead(path);
+  if (head === undefined) return undefined;
+
+  const newline = head.indexOf("\n");
+  if (newline !== -1) {
+    try {
+      const record = JSON.parse(head.slice(0, newline)) as {
+        type?: string;
+        payload?: Record<string, unknown>;
+      };
+      if (record.type !== "session_meta" || typeof record.payload !== "object" || !record.payload) {
+        return undefined;
+      }
+      const cwd = record.payload["cwd"];
+      return {
+        cwd: typeof cwd === "string" ? cwd : undefined,
+        subagent: isSubagentSource(record.payload["source"]),
+      };
+    } catch {
       return undefined;
     }
-    const cwd = record.payload["cwd"];
-    const source = record.payload["source"];
-    return {
-      cwd: typeof cwd === "string" ? cwd : undefined,
-      subagent: typeof source === "object" && source !== null && "subagent" in source,
-    };
-  } catch {
-    return undefined;
   }
+  return scanMeta(head);
 }
 
-function firstLine(path: string): string | undefined {
+/**
+ * Reads `cwd` and `source` out of a first record too long to parse whole.
+ * They are top-level fields written before the instructions, so the first
+ * occurrence of each is the record's own.
+ */
+function scanMeta(head: string): { cwd?: string; subagent: boolean } | undefined {
+  if (!/^\{"(?:timestamp|type)"/.test(head) || !head.includes('"type":"session_meta"')) {
+    return undefined;
+  }
+  const match = /"cwd":("(?:[^"\\]|\\.)*")/.exec(head);
+  let cwd: string | undefined;
+  if (match) {
+    try {
+      cwd = JSON.parse(match[1]!) as string;
+    } catch {
+      cwd = undefined;
+    }
+  }
+  return { cwd, subagent: /"source":\{"subagent"/.test(head) };
+}
+
+function readHead(path: string): string | undefined {
   let fd: number;
   try {
     fd = openSync(path, "r");
@@ -139,22 +179,9 @@ function firstLine(path: string): string | undefined {
     return undefined;
   }
   try {
-    const chunks: Buffer[] = [];
-    let total = 0;
-    const buf = Buffer.alloc(64 * 1024);
-    while (total < META_MAX_BYTES) {
-      const n = readSync(fd, buf, 0, buf.length, total);
-      if (n === 0) break;
-      const newline = buf.subarray(0, n).indexOf(0x0a);
-      if (newline !== -1) {
-        chunks.push(Buffer.from(buf.subarray(0, newline)));
-        return Buffer.concat(chunks).toString("utf8");
-      }
-      chunks.push(Buffer.from(buf.subarray(0, n)));
-      total += n;
-    }
-    // No newline yet: a rollout whose first record is still being written, or one line only.
-    return total > 0 && total < META_MAX_BYTES ? Buffer.concat(chunks).toString("utf8") : undefined;
+    const buf = Buffer.alloc(META_HEAD_BYTES);
+    const n = readSync(fd, buf, 0, buf.length, 0);
+    return n > 0 ? buf.subarray(0, n).toString("utf8") : undefined;
   } catch {
     return undefined;
   } finally {

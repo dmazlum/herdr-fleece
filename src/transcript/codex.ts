@@ -1,5 +1,5 @@
 import { isAbsolute, resolve } from "node:path";
-import { parseTranscript, readTurnsGrowing, type TurnParser } from "./reader.js";
+import type { TurnParser } from "./reader.js";
 import type { FileEdit, TokenUsage, ToolUse, Turn } from "./types.js";
 
 /**
@@ -18,8 +18,9 @@ import type { FileEdit, TokenUsage, ToolUse, Turn } from "./types.js";
  * - answers, reasoning and tool calls come from `response_item`, which every
  *   build writes.
  * - edited files come from `FileChange` items, which hold absolute paths for
- *   every patch however it was invoked. Builds without them fall back to the
- *   paths in an `apply_patch` call's patch text.
+ *   every patch however it was invoked; a failed or declined one is not an
+ *   edit. Builds without them fall back to the paths in an `apply_patch`
+ *   call's patch text, counted once its output shows the patch applied.
  * - usage is the growth of the session's running `total_token_usage` over the
  *   turn, which is immune to a `token_count` being written twice.
  */
@@ -37,22 +38,44 @@ interface Totals {
   output: number;
 }
 
+export interface AgentMessage {
+  text: string;
+  /** `commentary` or `final_answer`; absent in older builds. */
+  phase?: string;
+  at?: string;
+}
+
 /** A turn plus what is needed to finish it but never shown. */
 interface OpenTurn {
   turn: Turn;
-  /** Assistant messages in order; `phase` is absent in older builds. */
-  messages: { text: string; phase?: string }[];
-  /** `task_complete.last_agent_message`, used only when no message was recorded. */
+  messages: AgentMessage[];
+  /** `task_complete.last_agent_message`, the answer when no message qualifies. */
   lastAgentMessage?: string;
+  completedAt?: string;
+  /** The last record of any kind in the turn, for a turn with no answer yet. */
+  lastActivity?: string;
   /** Files from `FileChange` items. */
   changed: FileEdit[];
-  /** Files from `apply_patch` patch text, for builds that write no `FileChange`. */
+  /** Files from `apply_patch` calls whose output showed success, for builds with no `FileChange`. */
   patched: FileEdit[];
+  /** `apply_patch` paths by call id, waiting for the call's output. */
+  pendingPatches: Map<string, string[]>;
   baseline: Totals;
   latest: Totals;
 }
 
 const ZERO: Totals = { input: 0, cached: 0, cacheWrite: 0, output: 0 };
+
+/** `FileChange` statuses that mean the files were not changed. */
+const UNAPPLIED = new Set(["failed", "declined", "rejected"]);
+
+/** Wording of an `apply_patch` output that reports the patch did not apply. */
+const PATCH_FAILED = /verification failed|failed to (?:apply|find|read|write)|^error\b|rejected|declined/im;
+
+/** A rollout written by a subagent (a guardian review, a spawned worker), from `session_meta.source`. */
+export function isSubagentSource(source: unknown): boolean {
+  return typeof source === "object" && source !== null && "subagent" in source;
+}
 
 /** Lines that open a file section in an `apply_patch` patch. */
 const PATCH_FILE = /^\*\*\* (Add|Update|Delete) File: (.+)$|^\*\*\* Move to: (.+)$/;
@@ -96,8 +119,7 @@ class CodexParser implements TurnParser {
   }
 
   #meta(payload: Record<string, unknown>): void {
-    const source = payload["source"];
-    if (typeof source === "object" && source !== null && "subagent" in source) {
+    if (isSubagentSource(payload["source"])) {
       this.#ignored = true;
       return;
     }
@@ -130,7 +152,9 @@ class CodexParser implements TurnParser {
         const typed = item as Record<string, unknown>;
         if (typed["type"] === "UserMessage") this.#prompt(contentText(typed["content"]), at);
         else if (typed["type"] === "FileChange" && this.#current) {
-          addChanges(this.#current.changed, typed["changes"]);
+          if (!UNAPPLIED.has(str(typed["status"]) ?? "")) {
+            addChanges(this.#current.changed, typed["changes"]);
+          }
           touch(this.#current, at);
         }
         return;
@@ -146,6 +170,7 @@ class CodexParser implements TurnParser {
         const open = this.#current;
         if (!open) return;
         open.lastAgentMessage = str(payload["last_agent_message"]) ?? open.lastAgentMessage;
+        open.completedAt = at ?? open.completedAt;
         const ms = payload["duration_ms"];
         if (typeof ms === "number" && Number.isFinite(ms) && ms >= 0) open.turn.durationMs = ms;
         touch(open, at);
@@ -163,7 +188,7 @@ class CodexParser implements TurnParser {
         if (payload["role"] !== "assistant") return;
         const text = contentText(payload["content"]);
         if (text === "") return;
-        open.messages.push({ text, phase: str(payload["phase"]) });
+        open.messages.push({ text, phase: str(payload["phase"]), at });
         touch(open, at);
         return;
       }
@@ -180,9 +205,22 @@ class CodexParser implements TurnParser {
         addToolUse(open.turn.toolUses, name);
         if (name === "apply_patch") {
           const patch = patchText(payload["input"] ?? payload["arguments"]);
-          addPatchPaths(open.patched, patch, open.turn.cwd);
+          const paths = patchPaths(patch, open.turn.cwd);
+          const callId = str(payload["call_id"]);
+          // Without a call id there is no output to wait for; trust the call.
+          if (callId === undefined) for (const path of paths) addFile(open.patched, path);
+          else if (paths.length > 0) open.pendingPatches.set(callId, paths);
         }
         touch(open, at);
+        return;
+      }
+      case "function_call_output":
+      case "custom_tool_call_output": {
+        const callId = str(payload["call_id"]);
+        const paths = callId === undefined ? undefined : open.pendingPatches.get(callId);
+        if (!paths) return;
+        open.pendingPatches.delete(callId!);
+        if (patchApplied(payload["output"])) for (const path of paths) addFile(open.patched, path);
         return;
       }
       case "local_shell_call":
@@ -223,6 +261,7 @@ class CodexParser implements TurnParser {
       messages: [],
       changed: [],
       patched: [],
+      pendingPatches: new Map(),
       baseline: this.#totals,
       latest: this.#totals,
     };
@@ -231,46 +270,53 @@ class CodexParser implements TurnParser {
 
 export const codexParser = (): TurnParser => new CodexParser();
 
-export function readCodexTurns(path: string): Turn[] {
-  return readTurnsGrowing(path, codexParser).turns;
-}
-
-export function parseCodexTranscript(source: string): Turn[] {
-  return parseTranscript(source, codexParser);
+/** The messages that make up a turn's answer. */
+function answerMessages(messages: AgentMessage[]): AgentMessage[] {
+  if (messages.some((message) => message.phase !== undefined)) {
+    return messages.filter((message) => message.phase === "final_answer");
+  }
+  const last = messages.at(-1);
+  return last ? [last] : [];
 }
 
 /**
  * The answer is the final message, not the running commentary Codex writes
- * between tool calls. A build that marks no phases gets its last message; a
- * turn still working, with only commentary so far, has no answer yet.
+ * between tool calls. A build that marks no phases gets its last message. A
+ * turn still working, with only commentary so far, has no answer yet; once it
+ * completes, `task_complete` names its last message, and that is the answer.
  */
-export function answerText(
-  messages: { text: string; phase?: string }[],
-  lastAgentMessage?: string,
-): string {
-  let text: string;
-  if (messages.some((message) => message.phase !== undefined)) {
-    text = messages
-      .filter((message) => message.phase === "final_answer")
-      .map((message) => message.text)
-      .join("\n\n");
-  } else {
-    text = messages.at(-1)?.text ?? "";
-  }
-  if (text.trim() === "" && messages.length === 0) text = lastAgentMessage ?? "";
-  return text.trim();
+export function answerText(messages: AgentMessage[], lastAgentMessage?: string): string {
+  const text = answerMessages(messages)
+    .map((message) => message.text)
+    .join("\n\n")
+    .trim();
+  return text !== "" ? text : (lastAgentMessage ?? "").trim();
+}
+
+/**
+ * When the answer was written. It must not move once the answer exists: the
+ * journal names files by it, and a turn read before and after its trailing
+ * `task_complete` would otherwise be written twice.
+ */
+function answeredAt(open: OpenTurn): string | undefined {
+  const own = answerMessages(open.messages).filter((message) => message.text.trim() !== "");
+  if (own.length > 0) return own.at(-1)!.at ?? open.lastActivity;
+  if (open.lastAgentMessage?.trim()) return open.completedAt ?? open.lastActivity;
+  return open.lastActivity;
 }
 
 function finish(open: OpenTurn): Turn {
   const turn = open.turn;
   turn.text = answerText(open.messages, open.lastAgentMessage);
+  turn.endedAt = answeredAt(open);
   turn.thinking = turn.thinking.trim();
   turn.files = (open.changed.length > 0 ? open.changed : open.patched).slice();
   // The file worked on hardest is usually the one the answer is about.
   turn.files.sort((left, right) => right.edits - left.edits);
   turn.usage = usageBetween(open.baseline, open.latest);
-  if (turn.durationMs === undefined && turn.promptAt && turn.endedAt) {
-    const ms = Date.parse(turn.endedAt) - Date.parse(turn.promptAt);
+  const last = open.completedAt ?? open.lastActivity;
+  if (turn.durationMs === undefined && turn.promptAt && last) {
+    const ms = Date.parse(last) - Date.parse(turn.promptAt);
     if (Number.isFinite(ms) && ms >= 0) turn.durationMs = ms;
   }
   return turn;
@@ -288,6 +334,7 @@ function cloneOpen(open: OpenTurn): OpenTurn {
     messages: open.messages.slice(),
     changed: open.changed.map((file) => ({ ...file })),
     patched: open.patched.map((file) => ({ ...file })),
+    pendingPatches: new Map(open.pendingPatches),
   };
 }
 
@@ -301,7 +348,7 @@ function hasActivity(open: OpenTurn): boolean {
 }
 
 function touch(open: OpenTurn, at?: string): void {
-  if (at) open.turn.endedAt = at;
+  if (at) open.lastActivity = at;
 }
 
 /**
@@ -359,7 +406,31 @@ function patchText(raw: unknown): string {
   return raw;
 }
 
-function addPatchPaths(files: FileEdit[], patch: string, cwd?: string): void {
+/**
+ * Whether an `apply_patch` call's output shows the patch applied. Older
+ * builds wrap it as `{"output": …, "metadata": {"exit_code": n}}`; newer
+ * ones send content parts. Only wording that reports failure counts against.
+ */
+function patchApplied(output: unknown): boolean {
+  let text = typeof output === "string" ? output : contentText(output);
+  if (text.trimStart().startsWith("{")) {
+    try {
+      const parsed = JSON.parse(text) as Record<string, unknown>;
+      const metadata = parsed["metadata"];
+      if (typeof metadata === "object" && metadata !== null) {
+        const code = (metadata as Record<string, unknown>)["exit_code"];
+        if (typeof code === "number") return code === 0;
+      }
+      text = str(parsed["output"]) ?? text;
+    } catch {
+      /* plain text that starts with a brace */
+    }
+  }
+  return !PATCH_FAILED.test(text);
+}
+
+/** The files a patch leaves behind: added, updated or moved to, not deleted. */
+function patchPaths(patch: string, cwd?: string): string[] {
   const seen = new Set<string>();
   let section: string | undefined;
   for (const line of patch.split("\n")) {
@@ -381,7 +452,7 @@ function addPatchPaths(files: FileEdit[], patch: string, cwd?: string): void {
       section = path;
     }
   }
-  for (const path of seen) addFile(files, path);
+  return [...seen];
 }
 
 function addFile(files: FileEdit[], path: string): void {

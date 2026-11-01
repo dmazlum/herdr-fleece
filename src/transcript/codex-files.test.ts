@@ -95,3 +95,13 @@ test("codex files: the session id is the UUID at the end of a rollout's name", (
   );
   assert.equal(codexSessionId("/x/notes.jsonl"), undefined);
 });
+
+test("codex files: a long first line from a subagent is still recognised", () => {
+  withCodexHome((home) => {
+    const path = rollout(home, "2026/11/01", "bigsub", {
+      source: { subagent: { other: "guardian" } },
+      base_instructions: "x".repeat(200_000),
+    });
+    assert.deepEqual(sessionMeta(path), { cwd: "/work/app", subagent: true });
+  });
+});

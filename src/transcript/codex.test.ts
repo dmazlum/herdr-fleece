@@ -3,8 +3,11 @@ import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { TranscriptWatch } from "./reader.js";
-import { answerText, codexParser, parseCodexTranscript, readCodexTurns } from "./codex.js";
+import { parseTranscript, readTurnsGrowing, TranscriptWatch } from "./reader.js";
+import { answerText, codexParser } from "./codex.js";
+
+const parseCodexTranscript = (source: string) => parseTranscript(source, codexParser);
+const readCodexTurns = (path: string) => readTurnsGrowing(path, codexParser).turns;
 
 /**
  * Records follow the shapes Codex 0.166 writes (`item_completed` items,
@@ -290,4 +293,86 @@ test("codex: a live rollout read incrementally matches a full read", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("codex: a failed or declined FileChange is not an edit", () => {
+  const turns = parseCodexTranscript(
+    jsonl(
+      meta(),
+      userItem("edit"),
+      event({ type: "item_completed", item: { type: "FileChange", status: "failed", changes: { "/w/a.ts": { type: "update" } } } }),
+      event({ type: "item_completed", item: { type: "FileChange", status: "declined", changes: { "/w/b.ts": { type: "update" } } } }),
+      event({ type: "item_completed", item: { type: "FileChange", status: "completed", changes: { "/w/c.ts": { type: "update" } } } }),
+      event({ type: "item_completed", item: { type: "FileChange", changes: { "/w/d.ts": { type: "update" } } } }),
+    ),
+  );
+  assert.deepEqual(
+    turns[0]!.files.map((file) => file.path),
+    ["/w/c.ts", "/w/d.ts"],
+  );
+});
+
+test("codex: an apply_patch call counts its files only once its output shows success", () => {
+  const call = (id: string, file: string) =>
+    item({ type: "custom_tool_call", name: "apply_patch", call_id: id, input: `*** Update File: ${file}\n` });
+  const output = (id: string, text: string) => item({ type: "custom_tool_call_output", call_id: id, output: text });
+  const legacy = (id: string, code: number) =>
+    item({
+      type: "function_call_output",
+      call_id: id,
+      output: JSON.stringify({ output: code === 0 ? "Success." : "boom", metadata: { exit_code: code } }),
+    });
+
+  const turns = parseCodexTranscript(
+    jsonl(
+      meta({ cwd: "/w" }),
+      userItem("patch"),
+      call("c1", "ok.ts"),
+      output("c1", "Success. Updated the following files:\nM ok.ts"),
+      call("c2", "bad.ts"),
+      output("c2", "apply_patch verification failed: Failed to find expected lines in bad.ts"),
+      call("c3", "legacy-ok.ts"),
+      legacy("c3", 0),
+      call("c4", "legacy-bad.ts"),
+      legacy("c4", 1),
+      call("c5", "pending.ts"), // still running: no output yet
+    ),
+  );
+  assert.deepEqual(
+    turns[0]!.files.map((file) => file.path),
+    ["/w/ok.ts", "/w/legacy-ok.ts"],
+  );
+});
+
+test("codex: endedAt is when the answer was written, and does not move after it", () => {
+  const source = jsonl(
+    meta(),
+    userItem("go"),
+    say("on it", "commentary"),
+    { timestamp: "2026-11-01T10:05:00.000Z", type: "response_item", payload: { type: "message", role: "assistant", phase: "final_answer", content: [{ type: "output_text", text: "done" }] } },
+  );
+  const before = parseCodexTranscript(source)[0]!;
+  const after = parseCodexTranscript(
+    source +
+      jsonl(
+        { timestamp: "2026-11-01T10:05:03.000Z", type: "event_msg", payload: { type: "item_completed", item: { type: "FileChange", changes: { "/w/late.ts": { type: "add" } } } } },
+        { timestamp: "2026-11-01T10:05:04.000Z", type: "event_msg", payload: { type: "task_complete", last_agent_message: "done", duration_ms: 9000 } },
+      ),
+  )[0]!;
+  assert.equal(before.endedAt, "2026-11-01T10:05:00.000Z");
+  assert.equal(after.endedAt, before.endedAt);
+  assert.equal(after.durationMs, 9000);
+});
+
+test("codex: a completed turn with only commentary takes its answer from task_complete", () => {
+  const turns = parseCodexTranscript(
+    jsonl(
+      meta(),
+      userItem("quick one"),
+      say("Checked; nothing to change.", "commentary"),
+      { timestamp: "2026-11-01T11:00:00.000Z", type: "event_msg", payload: { type: "task_complete", last_agent_message: "Checked; nothing to change." } },
+    ),
+  );
+  assert.equal(turns[0]!.text, "Checked; nothing to change.");
+  assert.equal(turns[0]!.endedAt, "2026-11-01T11:00:00.000Z");
 });
