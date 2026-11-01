@@ -21,7 +21,7 @@ import { keyMap, PANEL_CHROME_ROWS, renderPanel } from "./render/panel.js";
 import { CLEAR, enterScreen, KEY, leaveScreen, onKeys, onResize, terminalSize } from "./screen.js";
 import { subscribe, type EventStream, type HerdrEvent, type StreamState } from "./socket.js";
 import { StatusLine } from "./status.js";
-import { AgentTranscriptWatch, locateTranscript } from "./transcript/agents.js";
+import { AgentTranscriptWatch, guessTranscript, locateTranscript } from "./transcript/agents.js";
 import type { Target, Turn } from "./transcript/types.js";
 import { stepPin, windowLabel, windowOf } from "./window.js";
 
@@ -181,6 +181,7 @@ async function retarget(paneId: string, force = false): Promise<void> {
     title: pane.terminal_title_stripped,
   };
   target.transcriptPath = locateTranscript(target);
+  if (!sessionId) guessTranscript(target); // See resolve.ts: only when Herdr named no session.
 
   transcriptStamp = "";
   transcript.reset();

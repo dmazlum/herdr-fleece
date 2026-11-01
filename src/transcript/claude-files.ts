@@ -2,10 +2,14 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+/** Claude Code's config directory: `$CLAUDE_CONFIG_DIR`, else `~/.claude`. */
+export function claudeHome(): string {
+  return process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
+}
+
 /** Where Claude Code keeps transcripts: `<config>/projects/<cwd, flattened>/<session>.jsonl`. */
 export function claudeProjectsDir(): string {
-  const base = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
-  return join(base, "projects");
+  return join(claudeHome(), "projects");
 }
 
 function projectDir(cwd: string): string {

@@ -72,6 +72,27 @@ export function locateTranscript(target: Target): string | undefined {
   return agent.find(target.sessionId, target.cwd) ?? undefined;
 }
 
+/**
+ * Falls back to the newest transcript for the target's folder, taking the
+ * session id from the file it picks. It is only a guess — two sessions in one
+ * folder share it — so callers use it last and the target is marked.
+ */
+export function guessTranscript(target: Target): void {
+  const agent = agentTranscripts(target.agent);
+  if (!agent || !target.cwd) return;
+  const path = agent.newest(target.cwd);
+  if (!path) return;
+  target.transcriptPath = path;
+  target.sessionId ??= agent.sessionOf(path);
+  target.guessed = true;
+}
+
+/** How `doctor` shows where a target's transcript came from. */
+export function describeTranscript(target: Target): string {
+  if (!target.transcriptPath) return "(not found)";
+  return target.guessed ? `${target.transcriptPath} (guessed from folder)` : target.transcriptPath;
+}
+
 /** Why a target has no transcript to read: an agent Fleece cannot read, or a file not found. */
 export function missingTranscript(target: Target): string {
   const agent = agentTranscripts(target.agent);

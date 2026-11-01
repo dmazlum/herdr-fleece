@@ -6,6 +6,8 @@ import { test } from "node:test";
 import {
   agentTranscripts,
   AgentTranscriptWatch,
+  describeTranscript,
+  guessTranscript,
   locateTranscript,
   missingTranscript,
   readTargetTurns,
@@ -74,4 +76,24 @@ test("agents: reading without a transcript or for an unknown agent throws a Tran
   assert.throws(() => readTargetTurns({ paneId: "p", agent: "claude" }), TranscriptError);
   assert.throws(() => readTargetTurns({ paneId: "p", agent: "aider", transcriptPath: "/x" }), TranscriptError);
   assert.throws(() => new AgentTranscriptWatch().read("aider", "/x"), TranscriptError);
+});
+
+test("agents: a guess takes the folder's newest transcript and is marked as one", () => {
+  withClaudeHome((projects) => {
+    const dir = join(projects, "-work-app");
+    mkdirSync(dir);
+    writeFileSync(join(dir, "s9.jsonl"), `${prompt("hi")}\n`);
+
+    const target: Parameters<typeof guessTranscript>[0] = { paneId: "p", agent: "claude", cwd: "/work/app" };
+    guessTranscript(target);
+    assert.equal(target.transcriptPath, join(dir, "s9.jsonl"));
+    assert.equal(target.sessionId, "s9");
+    assert.equal(target.guessed, true);
+    assert.equal(describeTranscript(target), `${join(dir, "s9.jsonl")} (guessed from folder)`);
+
+    const nowhere: Parameters<typeof guessTranscript>[0] = { paneId: "p", agent: "claude", cwd: "/nowhere" };
+    guessTranscript(nowhere);
+    assert.equal(nowhere.transcriptPath, undefined);
+    assert.equal(describeTranscript(nowhere), "(not found)");
+  });
 });

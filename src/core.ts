@@ -1,9 +1,9 @@
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { agentTranscripts, locateTranscript } from "./transcript/agents.js";
+import { agentTranscripts, guessTranscript, locateTranscript } from "./transcript/agents.js";
+import { claudeHome } from "./transcript/claude-files.js";
 import type { Target } from "./transcript/types.js";
 
 const run = promisify(execFile);
@@ -75,8 +75,7 @@ export function terminalAgent(terminal: CoreTerminal): string {
 }
 
 export function claudeSessionsDir(): string {
-  const base = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
-  return join(base, "sessions");
+  return join(claudeHome(), "sessions");
 }
 
 /**
@@ -113,10 +112,7 @@ export async function resolveTerminal(address: string): Promise<Target> {
   const pid = terminal.foreground?.pid;
   if (target.agent === "claude" && pid) target.sessionId = sessionIdForPid(pid);
   target.transcriptPath = locateTranscript(target);
-  // Without a session id the newest transcript for the folder is a guess, used last.
-  if (!target.transcriptPath && cwd) {
-    target.transcriptPath = agent.newest(cwd);
-    if (target.transcriptPath) target.sessionId ??= agent.sessionOf(target.transcriptPath);
-  }
+  // The app has no session id for Codex at all, and Claude's pid file can lag.
+  if (!target.transcriptPath) guessTranscript(target);
   return target;
 }

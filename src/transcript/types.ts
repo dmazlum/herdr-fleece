@@ -47,4 +47,6 @@ export interface Target {
   cwd?: string;
   title?: string;
   transcriptPath?: string;
+  /** The transcript is the newest one for `cwd`, not one the session id named. */
+  guessed?: boolean;
 }

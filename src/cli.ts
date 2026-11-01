@@ -17,7 +17,12 @@ import { journalTurns } from "./journal.js";
 import { COMMANDS } from "./keys.js";
 import { renderFrame } from "./render/frame.js";
 import { resolveTarget } from "./resolve.js";
-import { missingTranscript, readTargetTurns, supportedAgents } from "./transcript/agents.js";
+import {
+  describeTranscript,
+  missingTranscript,
+  readTargetTurns,
+  supportedAgents,
+} from "./transcript/agents.js";
 import type { Target, Turn } from "./transcript/types.js";
 
 class FleeceError extends Error {}
@@ -206,7 +211,7 @@ async function doctor(flags: Flags): Promise<void> {
     lines.push(`agent            ${target.agent}`);
     lines.push(`session          ${target.sessionId ?? "(none)"}`);
     lines.push(`cwd              ${target.cwd ?? "(unknown)"}`);
-    lines.push(`transcript       ${target.transcriptPath ?? "(not found)"}`);
+    lines.push(`transcript       ${describeTranscript(target)}`);
 
     if (target.transcriptPath) {
       const turns = readTargetTurns(target);

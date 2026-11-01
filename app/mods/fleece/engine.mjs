@@ -226,109 +226,11 @@ function int(table, key) {
 // src/core.ts
 import { execFile } from "node:child_process";
 import { readFileSync as readFileSync2 } from "node:fs";
-import { homedir as homedir4 } from "node:os";
 import { join as join4 } from "node:path";
 import { promisify } from "node:util";
 
 // src/transcript/agents.ts
 import { basename } from "node:path";
-
-// src/transcript/reader.ts
-import { closeSync, openSync, readSync, statSync } from "node:fs";
-var PREFIX_BYTES = 32;
-function emptyCursor(parser) {
-  return {
-    offset: 0,
-    pending: Buffer.alloc(0),
-    parser,
-    ino: 0,
-    dev: 0,
-    mtimeMs: 0,
-    prefix: Buffer.alloc(0)
-  };
-}
-function readTurnsGrowing(path, createParser, previous) {
-  const info = statSync(path);
-  const cursor = previous && canContinue(previous, info, path) ? previous : emptyCursor(createParser());
-  if (cursor.offset === info.size && cursor.pending.length === 0) {
-    return { turns: cursor.parser.snapshot(), cursor };
-  }
-  const fd = openSync(path, "r");
-  try {
-    const length = info.size - cursor.offset;
-    if (length > 0) {
-      const chunk = Buffer.alloc(length);
-      let read = 0;
-      while (read < length) {
-        const n = readSync(fd, chunk, read, length - read, cursor.offset + read);
-        if (n === 0) break;
-        read += n;
-      }
-      ingestBytes(cursor, chunk.subarray(0, read));
-      cursor.offset += read;
-    }
-    flushPending(cursor);
-    rememberFile(cursor, info, fd);
-  } finally {
-    closeSync(fd);
-  }
-  return { turns: cursor.parser.snapshot(), cursor };
-}
-function canContinue(previous, info, path) {
-  if (previous.offset === 0) return true;
-  if (info.size < previous.offset) return false;
-  if (previous.ino !== 0 && (info.ino !== previous.ino || info.dev !== previous.dev)) return false;
-  if (info.size === previous.offset && info.mtimeMs !== previous.mtimeMs) return false;
-  if (previous.prefix.length === 0) return true;
-  const fd = openSync(path, "r");
-  try {
-    const buf = Buffer.alloc(previous.prefix.length);
-    const n = readSync(fd, buf, 0, buf.length, 0);
-    return n === previous.prefix.length && buf.equals(previous.prefix);
-  } finally {
-    closeSync(fd);
-  }
-}
-function rememberFile(cursor, info, fd) {
-  cursor.ino = info.ino;
-  cursor.dev = info.dev;
-  cursor.mtimeMs = info.mtimeMs;
-  if (cursor.prefix.length > 0 || info.size === 0) return;
-  const n = Math.min(PREFIX_BYTES, info.size);
-  const buf = Buffer.alloc(n);
-  if (readSync(fd, buf, 0, n, 0) === n) cursor.prefix = buf;
-}
-function flushPending(cursor) {
-  if (cursor.pending.length === 0) return;
-  const line = cursor.pending.toString("utf8");
-  if (line.trim() === "") {
-    cursor.pending = Buffer.alloc(0);
-    return;
-  }
-  const record = parseLine(line);
-  if (record === void 0) return;
-  cursor.parser.ingest(record);
-  cursor.pending = Buffer.alloc(0);
-}
-function ingestBytes(cursor, chunk) {
-  const data = cursor.pending.length === 0 ? chunk : Buffer.concat([cursor.pending, chunk]);
-  let start = 0;
-  for (let i = 0; i < data.length; i++) {
-    if (data[i] !== 10) continue;
-    const record = parseLine(data.subarray(start, i).toString("utf8"));
-    if (record !== void 0) cursor.parser.ingest(record);
-    start = i + 1;
-  }
-  cursor.pending = start === 0 ? data : Buffer.from(data.subarray(start));
-}
-function parseLine(line) {
-  if (line.trim() === "") return void 0;
-  try {
-    return JSON.parse(line);
-  } catch {
-    return void 0;
-  }
-}
 
 // src/transcript/claude.ts
 var WRITE_TOOLS = {
@@ -475,12 +377,14 @@ function cleanPrompt(raw) {
 }
 
 // src/transcript/claude-files.ts
-import { existsSync, readdirSync, statSync as statSync2 } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir as homedir2 } from "node:os";
 import { join as join2 } from "node:path";
+function claudeHome() {
+  return process.env.CLAUDE_CONFIG_DIR ?? join2(homedir2(), ".claude");
+}
 function claudeProjectsDir() {
-  const base = process.env.CLAUDE_CONFIG_DIR ?? join2(homedir2(), ".claude");
-  return join2(base, "projects");
+  return join2(claudeHome(), "projects");
 }
 function projectDir(cwd) {
   return join2(claudeProjectsDir(), cwd.replace(/[/.]/g, "-"));
@@ -517,7 +421,7 @@ function newestClaudeTranscript(cwd) {
     if (!entry.endsWith(".jsonl")) continue;
     const path = join2(dir, entry);
     try {
-      const mtime = statSync2(path).mtimeMs;
+      const mtime = statSync(path).mtimeMs;
       if (!best || mtime > best.mtime) best = { path, mtime };
     } catch {
     }
@@ -528,6 +432,11 @@ function newestClaudeTranscript(cwd) {
 // src/transcript/codex.ts
 import { isAbsolute, resolve as resolve2 } from "node:path";
 var ZERO = { input: 0, cached: 0, cacheWrite: 0, output: 0 };
+var UNAPPLIED = /* @__PURE__ */ new Set(["failed", "declined", "rejected"]);
+var PATCH_FAILED = /verification failed|failed to (?:apply|find|read|write)|^error\b|rejected|declined/im;
+function isSubagentSource(source) {
+  return typeof source === "object" && source !== null && "subagent" in source;
+}
 var PATCH_FILE = /^\*\*\* (Add|Update|Delete) File: (.+)$|^\*\*\* Move to: (.+)$/;
 var CodexParser = class {
   #closed = [];
@@ -564,8 +473,7 @@ var CodexParser = class {
     return [...this.#closed, finish2(cloneOpen(this.#current))];
   }
   #meta(payload) {
-    const source = payload["source"];
-    if (typeof source === "object" && source !== null && "subagent" in source) {
+    if (isSubagentSource(payload["source"])) {
       this.#ignored = true;
       return;
     }
@@ -595,7 +503,9 @@ var CodexParser = class {
         const typed = item;
         if (typed["type"] === "UserMessage") this.#prompt(contentText(typed["content"]), at);
         else if (typed["type"] === "FileChange" && this.#current) {
-          addChanges(this.#current.changed, typed["changes"]);
+          if (!UNAPPLIED.has(str2(typed["status"]) ?? "")) {
+            addChanges(this.#current.changed, typed["changes"]);
+          }
           touch(this.#current, at);
         }
         return;
@@ -611,6 +521,7 @@ var CodexParser = class {
         const open2 = this.#current;
         if (!open2) return;
         open2.lastAgentMessage = str2(payload["last_agent_message"]) ?? open2.lastAgentMessage;
+        open2.completedAt = at ?? open2.completedAt;
         const ms = payload["duration_ms"];
         if (typeof ms === "number" && Number.isFinite(ms) && ms >= 0) open2.turn.durationMs = ms;
         touch(open2, at);
@@ -626,7 +537,7 @@ var CodexParser = class {
         if (payload["role"] !== "assistant") return;
         const text = contentText(payload["content"]);
         if (text === "") return;
-        open2.messages.push({ text, phase: str2(payload["phase"]) });
+        open2.messages.push({ text, phase: str2(payload["phase"]), at });
         touch(open2, at);
         return;
       }
@@ -644,9 +555,21 @@ ${summary}`;
         addToolUse2(open2.turn.toolUses, name);
         if (name === "apply_patch") {
           const patch = patchText(payload["input"] ?? payload["arguments"]);
-          addPatchPaths(open2.patched, patch, open2.turn.cwd);
+          const paths = patchPaths(patch, open2.turn.cwd);
+          const callId = str2(payload["call_id"]);
+          if (callId === void 0) for (const path of paths) addFile(open2.patched, path);
+          else if (paths.length > 0) open2.pendingPatches.set(callId, paths);
         }
         touch(open2, at);
+        return;
+      }
+      case "function_call_output":
+      case "custom_tool_call_output": {
+        const callId = str2(payload["call_id"]);
+        const paths = callId === void 0 ? void 0 : open2.pendingPatches.get(callId);
+        if (!paths) return;
+        open2.pendingPatches.delete(callId);
+        if (patchApplied(payload["output"])) for (const path of paths) addFile(open2.patched, path);
         return;
       }
       case "local_shell_call":
@@ -683,31 +606,41 @@ ${summary}`;
       messages: [],
       changed: [],
       patched: [],
+      pendingPatches: /* @__PURE__ */ new Map(),
       baseline: this.#totals,
       latest: this.#totals
     };
   }
 };
 var codexParser = () => new CodexParser();
-function answerText(messages, lastAgentMessage) {
-  let text;
+function answerMessages(messages) {
   if (messages.some((message2) => message2.phase !== void 0)) {
-    text = messages.filter((message2) => message2.phase === "final_answer").map((message2) => message2.text).join("\n\n");
-  } else {
-    text = messages.at(-1)?.text ?? "";
+    return messages.filter((message2) => message2.phase === "final_answer");
   }
-  if (text.trim() === "" && messages.length === 0) text = lastAgentMessage ?? "";
-  return text.trim();
+  const last = messages.at(-1);
+  return last ? [last] : [];
+}
+function answerText(messages, lastAgentMessage) {
+  const text = answerMessages(messages).map((message2) => message2.text).join("\n\n").trim();
+  return text !== "" ? text : (lastAgentMessage ?? "").trim();
+}
+function answeredAt(open2) {
+  const own = answerMessages(open2.messages).filter((message2) => message2.text.trim() !== "");
+  if (own.length > 0) return own.at(-1).at ?? open2.lastActivity;
+  if (open2.lastAgentMessage?.trim()) return open2.completedAt ?? open2.lastActivity;
+  return open2.lastActivity;
 }
 function finish2(open2) {
   const turn = open2.turn;
   turn.text = answerText(open2.messages, open2.lastAgentMessage);
+  turn.endedAt = answeredAt(open2);
   turn.thinking = turn.thinking.trim();
   turn.files = (open2.changed.length > 0 ? open2.changed : open2.patched).slice();
   turn.files.sort((left, right) => right.edits - left.edits);
   turn.usage = usageBetween(open2.baseline, open2.latest);
-  if (turn.durationMs === void 0 && turn.promptAt && turn.endedAt) {
-    const ms = Date.parse(turn.endedAt) - Date.parse(turn.promptAt);
+  const last = open2.completedAt ?? open2.lastActivity;
+  if (turn.durationMs === void 0 && turn.promptAt && last) {
+    const ms = Date.parse(last) - Date.parse(turn.promptAt);
     if (Number.isFinite(ms) && ms >= 0) turn.durationMs = ms;
   }
   return turn;
@@ -723,14 +656,15 @@ function cloneOpen(open2) {
     },
     messages: open2.messages.slice(),
     changed: open2.changed.map((file) => ({ ...file })),
-    patched: open2.patched.map((file) => ({ ...file }))
+    patched: open2.patched.map((file) => ({ ...file })),
+    pendingPatches: new Map(open2.pendingPatches)
   };
 }
 function hasActivity(open2) {
   return open2.messages.length > 0 || open2.turn.toolUses.length > 0 || open2.changed.length > 0 || open2.turn.thinking !== "";
 }
 function touch(open2, at) {
-  if (at) open2.turn.endedAt = at;
+  if (at) open2.lastActivity = at;
 }
 function usageBetween(from, to) {
   const delta = (key) => Math.max(0, to[key] - from[key]);
@@ -774,7 +708,23 @@ function patchText(raw) {
   }
   return raw;
 }
-function addPatchPaths(files, patch, cwd) {
+function patchApplied(output) {
+  let text = typeof output === "string" ? output : contentText(output);
+  if (text.trimStart().startsWith("{")) {
+    try {
+      const parsed = JSON.parse(text);
+      const metadata = parsed["metadata"];
+      if (typeof metadata === "object" && metadata !== null) {
+        const code = metadata["exit_code"];
+        if (typeof code === "number") return code === 0;
+      }
+      text = str2(parsed["output"]) ?? text;
+    } catch {
+    }
+  }
+  return !PATCH_FAILED.test(text);
+}
+function patchPaths(patch, cwd) {
   const seen = /* @__PURE__ */ new Set();
   let section2;
   for (const line of patch.split("\n")) {
@@ -795,7 +745,7 @@ function addPatchPaths(files, patch, cwd) {
       section2 = path;
     }
   }
-  for (const path of seen) addFile(files, path);
+  return [...seen];
 }
 function addFile(files, path) {
   if (path.trim() === "") return;
@@ -829,7 +779,7 @@ function num2(value) {
 }
 
 // src/transcript/codex-files.ts
-import { closeSync as closeSync2, existsSync as existsSync2, openSync as openSync2, readdirSync as readdirSync2, readSync as readSync2, statSync as statSync3 } from "node:fs";
+import { closeSync, existsSync as existsSync2, openSync, readdirSync as readdirSync2, readSync, statSync as statSync2 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
 import { join as join3 } from "node:path";
 function codexHome() {
@@ -862,6 +812,7 @@ function findCodexTranscript(sessionId) {
   return null;
 }
 var NEWEST_SCAN_LIMIT = 200;
+var NEWEST_OPEN_LIMIT = 1e3;
 function newestCodexTranscript(cwd) {
   const candidates = [];
   for (const dir of dayDirs(codexSessionsDir())) {
@@ -869,15 +820,18 @@ function newestCodexTranscript(cwd) {
       if (!entry.startsWith("rollout-") || !entry.endsWith(".jsonl")) continue;
       const path = join3(dir, entry);
       try {
-        candidates.push({ path, mtime: statSync3(path).mtimeMs });
+        candidates.push({ path, mtime: statSync2(path).mtimeMs });
       } catch {
       }
     }
   }
   candidates.sort((left, right) => right.mtime - left.mtime);
-  for (const { path } of candidates.slice(0, NEWEST_SCAN_LIMIT)) {
+  let topLevel = 0;
+  for (const { path } of candidates.slice(0, NEWEST_OPEN_LIMIT)) {
     const meta = sessionMeta(path);
-    if (meta && meta.cwd === cwd && !meta.subagent) return path;
+    if (!meta || meta.subagent) continue;
+    if (meta.cwd === cwd) return path;
+    if (++topLevel >= NEWEST_SCAN_LIMIT) break;
   }
   return void 0;
 }
@@ -902,52 +856,155 @@ function list(dir) {
     return [];
   }
 }
-var META_MAX_BYTES = 1024 * 1024;
+var META_HEAD_BYTES = 64 * 1024;
 function sessionMeta(path) {
-  const line = firstLine(path);
-  if (line === void 0) return void 0;
-  try {
-    const record = JSON.parse(line);
-    if (record.type !== "session_meta" || typeof record.payload !== "object" || !record.payload) {
+  const head = readHead(path);
+  if (head === void 0) return void 0;
+  const newline = head.indexOf("\n");
+  if (newline !== -1) {
+    try {
+      const record = JSON.parse(head.slice(0, newline));
+      if (record.type !== "session_meta" || typeof record.payload !== "object" || !record.payload) {
+        return void 0;
+      }
+      const cwd = record.payload["cwd"];
+      return {
+        cwd: typeof cwd === "string" ? cwd : void 0,
+        subagent: isSubagentSource(record.payload["source"])
+      };
+    } catch {
       return void 0;
     }
-    const cwd = record.payload["cwd"];
-    const source = record.payload["source"];
-    return {
-      cwd: typeof cwd === "string" ? cwd : void 0,
-      subagent: typeof source === "object" && source !== null && "subagent" in source
-    };
-  } catch {
+  }
+  return scanMeta(head);
+}
+function scanMeta(head) {
+  if (!/^\{"(?:timestamp|type)"/.test(head) || !head.includes('"type":"session_meta"')) {
     return void 0;
   }
+  const match = /"cwd":("(?:[^"\\]|\\.)*")/.exec(head);
+  let cwd;
+  if (match) {
+    try {
+      cwd = JSON.parse(match[1]);
+    } catch {
+      cwd = void 0;
+    }
+  }
+  return { cwd, subagent: /"source":\{"subagent"/.test(head) };
 }
-function firstLine(path) {
+function readHead(path) {
   let fd;
   try {
-    fd = openSync2(path, "r");
+    fd = openSync(path, "r");
   } catch {
     return void 0;
   }
   try {
-    const chunks = [];
-    let total = 0;
-    const buf = Buffer.alloc(64 * 1024);
-    while (total < META_MAX_BYTES) {
-      const n = readSync2(fd, buf, 0, buf.length, total);
-      if (n === 0) break;
-      const newline = buf.subarray(0, n).indexOf(10);
-      if (newline !== -1) {
-        chunks.push(Buffer.from(buf.subarray(0, newline)));
-        return Buffer.concat(chunks).toString("utf8");
-      }
-      chunks.push(Buffer.from(buf.subarray(0, n)));
-      total += n;
-    }
-    return total > 0 && total < META_MAX_BYTES ? Buffer.concat(chunks).toString("utf8") : void 0;
+    const buf = Buffer.alloc(META_HEAD_BYTES);
+    const n = readSync(fd, buf, 0, buf.length, 0);
+    return n > 0 ? buf.subarray(0, n).toString("utf8") : void 0;
   } catch {
     return void 0;
   } finally {
+    closeSync(fd);
+  }
+}
+
+// src/transcript/reader.ts
+import { closeSync as closeSync2, openSync as openSync2, readSync as readSync2, statSync as statSync3 } from "node:fs";
+var PREFIX_BYTES = 32;
+function emptyCursor(parser) {
+  return {
+    offset: 0,
+    pending: Buffer.alloc(0),
+    parser,
+    ino: 0,
+    dev: 0,
+    mtimeMs: 0,
+    prefix: Buffer.alloc(0)
+  };
+}
+function readTurnsGrowing(path, createParser, previous) {
+  const info = statSync3(path);
+  const cursor = previous && canContinue(previous, info, path) ? previous : emptyCursor(createParser());
+  if (cursor.offset === info.size && cursor.pending.length === 0) {
+    return { turns: cursor.parser.snapshot(), cursor };
+  }
+  const fd = openSync2(path, "r");
+  try {
+    const length = info.size - cursor.offset;
+    if (length > 0) {
+      const chunk = Buffer.alloc(length);
+      let read = 0;
+      while (read < length) {
+        const n = readSync2(fd, chunk, read, length - read, cursor.offset + read);
+        if (n === 0) break;
+        read += n;
+      }
+      ingestBytes(cursor, chunk.subarray(0, read));
+      cursor.offset += read;
+    }
+    flushPending(cursor);
+    rememberFile(cursor, info, fd);
+  } finally {
     closeSync2(fd);
+  }
+  return { turns: cursor.parser.snapshot(), cursor };
+}
+function canContinue(previous, info, path) {
+  if (previous.offset === 0) return true;
+  if (info.size < previous.offset) return false;
+  if (previous.ino !== 0 && (info.ino !== previous.ino || info.dev !== previous.dev)) return false;
+  if (info.size === previous.offset && info.mtimeMs !== previous.mtimeMs) return false;
+  if (previous.prefix.length === 0) return true;
+  const fd = openSync2(path, "r");
+  try {
+    const buf = Buffer.alloc(previous.prefix.length);
+    const n = readSync2(fd, buf, 0, buf.length, 0);
+    return n === previous.prefix.length && buf.equals(previous.prefix);
+  } finally {
+    closeSync2(fd);
+  }
+}
+function rememberFile(cursor, info, fd) {
+  cursor.ino = info.ino;
+  cursor.dev = info.dev;
+  cursor.mtimeMs = info.mtimeMs;
+  if (cursor.prefix.length > 0 || info.size === 0) return;
+  const n = Math.min(PREFIX_BYTES, info.size);
+  const buf = Buffer.alloc(n);
+  if (readSync2(fd, buf, 0, n, 0) === n) cursor.prefix = buf;
+}
+function flushPending(cursor) {
+  if (cursor.pending.length === 0) return;
+  const line = cursor.pending.toString("utf8");
+  if (line.trim() === "") {
+    cursor.pending = Buffer.alloc(0);
+    return;
+  }
+  const record = parseLine(line);
+  if (record === void 0) return;
+  cursor.parser.ingest(record);
+  cursor.pending = Buffer.alloc(0);
+}
+function ingestBytes(cursor, chunk) {
+  const data = cursor.pending.length === 0 ? chunk : Buffer.concat([cursor.pending, chunk]);
+  let start = 0;
+  for (let i = 0; i < data.length; i++) {
+    if (data[i] !== 10) continue;
+    const record = parseLine(data.subarray(start, i).toString("utf8"));
+    if (record !== void 0) cursor.parser.ingest(record);
+    start = i + 1;
+  }
+  cursor.pending = start === 0 ? data : Buffer.from(data.subarray(start));
+}
+function parseLine(line) {
+  if (line.trim() === "") return void 0;
+  try {
+    return JSON.parse(line);
+  } catch {
+    return void 0;
   }
 }
 
@@ -983,6 +1040,19 @@ function locateTranscript(target) {
   const agent = agentTranscripts(target.agent);
   if (!agent || !target.sessionId) return void 0;
   return agent.find(target.sessionId, target.cwd) ?? void 0;
+}
+function guessTranscript(target) {
+  const agent = agentTranscripts(target.agent);
+  if (!agent || !target.cwd) return;
+  const path = agent.newest(target.cwd);
+  if (!path) return;
+  target.transcriptPath = path;
+  target.sessionId ??= agent.sessionOf(path);
+  target.guessed = true;
+}
+function describeTranscript(target) {
+  if (!target.transcriptPath) return "(not found)";
+  return target.guessed ? `${target.transcriptPath} (guessed from folder)` : target.transcriptPath;
 }
 function missingTranscript(target) {
   const agent = agentTranscripts(target.agent);
@@ -1038,8 +1108,7 @@ function terminalAgent(terminal) {
   return agentApp(terminal) ?? "unknown";
 }
 function claudeSessionsDir() {
-  const base = process.env.CLAUDE_CONFIG_DIR ?? join4(homedir4(), ".claude");
-  return join4(base, "sessions");
+  return join4(claudeHome(), "sessions");
 }
 function sessionIdForPid(pid, read = (path) => readFileSync2(path, "utf8")) {
   try {
@@ -1063,10 +1132,7 @@ async function resolveTerminal(address) {
   const pid = terminal.foreground?.pid;
   if (target.agent === "claude" && pid) target.sessionId = sessionIdForPid(pid);
   target.transcriptPath = locateTranscript(target);
-  if (!target.transcriptPath && cwd) {
-    target.transcriptPath = agent.newest(cwd);
-    if (target.transcriptPath) target.sessionId ??= agent.sessionOf(target.transcriptPath);
-  }
+  if (!target.transcriptPath) guessTranscript(target);
   return target;
 }
 
@@ -1245,7 +1311,7 @@ function stamp(iso) {
 
 // src/extract.ts
 import { existsSync as existsSync3 } from "node:fs";
-import { homedir as homedir5 } from "node:os";
+import { homedir as homedir4 } from "node:os";
 import { join as join6, resolve as resolve3 } from "node:path";
 
 // src/render/text.ts
@@ -1437,7 +1503,7 @@ var COMMAND_HEADS = /* @__PURE__ */ new Set([
 var MAX_PER_KIND = 12;
 var LONG_LINE = 800;
 function resolvePath(text, cwd) {
-  if (text.startsWith("~/")) return join6(homedir5(), text.slice(2));
+  if (text.startsWith("~/")) return join6(homedir4(), text.slice(2));
   if (text.startsWith("/")) return text;
   if (!cwd) return null;
   return resolve3(cwd, text);
@@ -1743,7 +1809,7 @@ async function doctor(flags, config) {
     const target = await resolveTerminal(requireTerminal(flags));
     lines.push(["terminal", target.paneId], ["agent", target.agent]);
     lines.push(["session", target.sessionId ?? "(none)"], ["cwd", target.cwd ?? "(unknown)"]);
-    lines.push(["transcript", target.transcriptPath ?? "(not found)"]);
+    lines.push(["transcript", describeTranscript(target)]);
     if (target.transcriptPath) {
       const turns = readTargetTurns(target);
       lines.push(["turns", `${turns.length} (${answers(turns).length} with an answer)`]);

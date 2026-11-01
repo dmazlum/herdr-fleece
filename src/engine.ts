@@ -7,7 +7,12 @@ import { launch, openArgs } from "./export/opener.js";
 import { extractItems } from "./extract.js";
 import { journalSummary, journalTurns } from "./journal.js";
 import { pickKeys } from "./keys.js";
-import { missingTranscript, readTargetTurns, supportedAgents } from "./transcript/agents.js";
+import {
+  describeTranscript,
+  missingTranscript,
+  readTargetTurns,
+  supportedAgents,
+} from "./transcript/agents.js";
 import type { Target, Turn } from "./transcript/types.js";
 import { answers, windowLabel, windowOf } from "./window.js";
 
@@ -145,7 +150,7 @@ async function doctor(flags: Flags, config: FleeceConfig): Promise<Reply> {
     const target = await resolveTerminal(requireTerminal(flags));
     lines.push(["terminal", target.paneId], ["agent", target.agent]);
     lines.push(["session", target.sessionId ?? "(none)"], ["cwd", target.cwd ?? "(unknown)"]);
-    lines.push(["transcript", target.transcriptPath ?? "(not found)"]);
+    lines.push(["transcript", describeTranscript(target)]);
     if (target.transcriptPath) {
       const turns = readTargetTurns(target);
       lines.push(["turns", `${turns.length} (${answers(turns).length} with an answer)`]);

@@ -1,5 +1,5 @@
 import { agentGet, paneCurrent, paneGet, type PaneAgent } from "./herdr.js";
-import { locateTranscript } from "./transcript/agents.js";
+import { guessTranscript, locateTranscript } from "./transcript/agents.js";
 import type { Target } from "./transcript/types.js";
 
 export class ResolveError extends Error {}
@@ -68,6 +68,10 @@ function targetFrom(pane: PaneAgent): Target {
   };
 
   target.transcriptPath = locateTranscript(target);
+  // Herdr names the session once the agent reports it. Only when it never
+  // did is the folder's newest transcript worth a guess; a named session that
+  // is missing on disk must not silently become a different conversation.
+  if (!sessionId) guessTranscript(target);
   return target;
 }
 
