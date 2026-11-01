@@ -1,6 +1,6 @@
 {
   "name": "herdr-fleece",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "description": "Frame your agent's last answer in Herdr, then copy, save or share it.",
