@@ -7,8 +7,7 @@ Frame your agent's last answer in [Herdr](https://herdr.dev), then copy, save, o
 A coding agent writes its best prose once and then scrolls it away. Fleece reads the
 session transcript — not the pane — and hands the answer back as raw Markdown.
 
-Requires **Node 20+**, **Herdr 0.8.0+**, and a **Claude Code** session. Codex is not
-supported yet.
+Requires **Node 20+**, **Herdr 0.8.0+**, and a **Claude Code** or **Codex** session.
 
 ## Features
 
@@ -46,8 +45,21 @@ Then merge [`app/keys.json`](app/keys.json) into `~/.config/herdr-app/keys.json`
 In the dock, click a row to copy it. Its keys match the plugin's (item key, `s`, `e`, `y`,
 `m`, `o`, `[`/`]`, `r`). The frame takes `y`, `c`, `m`, `d`, `[`/`]` and Esc. Configuration
 is read from `~/.config/fleece/config.toml` (or `$FLEECE_CONFIG_DIR`), with the same keys
-as below. Only Claude Code agents on this machine are supported. [`app/RECIPE.md`](app/RECIPE.md)
+as below. Claude Code and Codex agents on this machine are supported. [`app/RECIPE.md`](app/RECIPE.md)
 covers the details.
+
+## Agents
+
+Fleece finds the transcript from the session Herdr reports for the pane.
+
+| Agent | Transcripts | Setting |
+| --- | --- | --- |
+| Claude Code | `~/.claude/projects/<folder>/<session>.jsonl` | `CLAUDE_CONFIG_DIR` |
+| Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-…-<session>.jsonl` | `CODEX_HOME` |
+
+If Herdr has reported no session for the pane, Fleece falls back to the newest transcript
+for the pane's folder. Two sessions in one folder share that guess, so `fleece doctor`
+marks it as `(guessed from folder)`.
 
 ## Install
 
@@ -127,12 +139,16 @@ list is not enough.
 
 What gets listed:
 
-- **FILES** — from the agent's `Write`, `Edit`, `MultiEdit`, and `NotebookEdit` calls.
-  `Read` is omitted. The clipboard gets the absolute path.
+- **FILES** — from the agent's own edits: Claude Code's `Write`, `Edit`, `MultiEdit`, and
+  `NotebookEdit` calls, or Codex's applied patches. Reads, deleted files, and patches that
+  failed are omitted. The clipboard gets the absolute path.
 - **CODE** — fenced blocks with a language tag, or contents that look like source.
 - **PATH** — mentioned paths that exist on disk, after FILES has claimed the edited ones.
 - **COMMAND** — runnable lines. A command shown with its result (`npm test → 70 passing`)
   is left out.
+
+With Codex, the answer is its final message; the progress notes it writes between tool
+calls are left out.
 
 `[` / `]` walks that window back through the session. `y`, `m`, and `o` follow the
 window. A new turn does not move a window you have paged away from.
