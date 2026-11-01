@@ -1,10 +1,4 @@
-import {
-  parseTranscript,
-  readTurnsGrowing as readGrowing,
-  TranscriptWatch as Watch,
-  type TranscriptCursor,
-  type TurnParser,
-} from "./reader.js";
+import type { TurnParser } from "./reader.js";
 import type { FileEdit, TokenUsage, ToolUse, Turn } from "./types.js";
 
 /**
@@ -88,29 +82,6 @@ class ClaudeParser implements TurnParser {
 }
 
 export const claudeParser = (): TurnParser => new ClaudeParser();
-
-export function readTurns(path: string): Turn[] {
-  return readGrowing(path, claudeParser).turns;
-}
-
-/** See {@link readGrowing}; bound to the Claude parser. */
-export function readTurnsGrowing(
-  path: string,
-  previous?: TranscriptCursor | null,
-): { turns: Turn[]; cursor: TranscriptCursor } {
-  return readGrowing(path, claudeParser, previous);
-}
-
-/** A {@link Watch} over a Claude Code transcript. */
-export class TranscriptWatch extends Watch {
-  constructor() {
-    super(claudeParser);
-  }
-}
-
-export function parseClaudeTranscript(source: string): Turn[] {
-  return parseTranscript(source, claudeParser);
-}
 
 function cloneTurn(turn: Turn): Turn {
   return {

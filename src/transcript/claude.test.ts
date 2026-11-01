@@ -3,13 +3,14 @@ import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import {
-  cleanPrompt,
-  parseClaudeTranscript,
-  readTurns,
-  readTurnsGrowing,
-  TranscriptWatch,
-} from "./claude.js";
+import { claudeParser, cleanPrompt } from "./claude.js";
+import { parseTranscript, readTurnsGrowing as readGrowing, TranscriptWatch } from "./reader.js";
+import type { TranscriptCursor } from "./reader.js";
+
+const parseClaudeTranscript = (source: string) => parseTranscript(source, claudeParser);
+const readTurnsGrowing = (path: string, previous?: TranscriptCursor) =>
+  readGrowing(path, claudeParser, previous);
+const readTurns = (path: string) => readTurnsGrowing(path).turns;
 
 function jsonl(...records: unknown[]): string {
   return records.map((record) => JSON.stringify(record)).join("\n");
@@ -248,7 +249,7 @@ test("TranscriptWatch starts over when the file is replaced", () => {
   const path = join(dir, "session.jsonl");
   writeFileSync(path, `${jsonl(prompt("old"), answer([{ type: "text", text: "old" }]))}\n`);
 
-  const watch = new TranscriptWatch();
+  const watch = new TranscriptWatch(claudeParser);
   assert.equal(watch.read(path)[0]!.text, "old");
 
   writeFileSync(path, `${jsonl(prompt("new"), answer([{ type: "text", text: "new" }]))}\n`);

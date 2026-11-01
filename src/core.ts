@@ -1,9 +1,9 @@
 import { execFile } from "node:child_process";
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { homedir } from "node:os";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { claudeProjectsDir, findClaudeTranscript } from "./resolve.js";
+import { agentTranscripts, guessTranscript, locateTranscript } from "./transcript/agents.js";
+import { claudeHome } from "./transcript/claude-files.js";
 import type { Target } from "./transcript/types.js";
 
 const run = promisify(execFile);
@@ -12,7 +12,8 @@ const run = promisify(execFile);
  * Resolves a herdr-core terminal (`t8`) to the agent transcript behind it, for
  * the Herdr desktop app. The app has no plugin context and no session id on its
  * agents, so the chain is: core terminal → its foreground process → the
- * session file Claude Code keeps per pid → the transcript.
+ * session file Claude Code keeps per pid → the transcript. Codex keeps no such
+ * file, so a Codex terminal gets the newest top-level rollout for its folder.
  */
 
 export class CoreError extends Error {}
@@ -59,9 +60,27 @@ export function isClaude(terminal: CoreTerminal): boolean {
   return /(^|\/)claude$/.test(head);
 }
 
+/**
+ * Codex runs as its native binary, or through the npm launcher as
+ * `node …/bin/codex.js`, so both argv shapes count.
+ */
+export function isCodex(terminal: CoreTerminal): boolean {
+  const app = agentApp(terminal);
+  if (app === "codex" || app?.startsWith("codex-")) return true;
+  const [head = "", script = ""] = terminal.foreground?.argv ?? [];
+  if (/(^|\/)codex$/.test(head)) return true;
+  return /(^|\/)node$/.test(head) && /(^|\/)codex(\.js)?$/.test(script);
+}
+
+/** Herdr's name for the agent in a terminal, as the transcript registry knows it. */
+export function terminalAgent(terminal: CoreTerminal): string {
+  if (isClaude(terminal)) return "claude";
+  if (isCodex(terminal)) return "codex";
+  return agentApp(terminal) ?? "unknown";
+}
+
 export function claudeSessionsDir(): string {
-  const base = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
-  return join(base, "sessions");
+  return join(claudeHome(), "sessions");
 }
 
 /**
@@ -83,54 +102,23 @@ export function sessionIdForPid(
   }
 }
 
-/**
- * Without a session file, the newest transcript in the project directory is
- * the best guess. It is only a guess — two agents in one folder share it — so
- * it is used last.
- */
-export function newestTranscript(cwd: string): string | undefined {
-  const dir = join(claudeProjectsDir(), cwd.replace(/[/.]/g, "-"));
-  let best: { path: string; mtime: number } | undefined;
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return undefined;
-  }
-  for (const entry of entries) {
-    if (!entry.endsWith(".jsonl")) continue;
-    const path = join(dir, entry);
-    try {
-      const mtime = statSync(path).mtimeMs;
-      if (!best || mtime > best.mtime) best = { path, mtime };
-    } catch {
-      /* raced with a delete */
-    }
-  }
-  return best?.path;
-}
-
 export async function resolveTerminal(address: string): Promise<Target> {
   const terminal = await coreTerminal(address);
   const cwd = terminal.foreground?.cwd ?? terminal.cwd;
   const target: Target = {
     paneId: terminal.address ?? address,
     status: terminalState(terminal),
-    agent: isClaude(terminal) ? "claude" : (agentApp(terminal) ?? "unknown"),
+    agent: terminalAgent(terminal),
     cwd,
     title: terminal.title,
   };
-  if (target.agent !== "claude") return target;
+  const agent = agentTranscripts(target.agent);
+  if (!agent) return target;
 
   const pid = terminal.foreground?.pid;
-  target.sessionId = pid ? sessionIdForPid(pid) : undefined;
-  if (target.sessionId) {
-    target.transcriptPath = findClaudeTranscript(target.sessionId, cwd) ?? undefined;
-  }
-  if (!target.transcriptPath && cwd) {
-    target.transcriptPath = newestTranscript(cwd);
-    const file = target.transcriptPath?.split("/").pop();
-    if (file) target.sessionId ??= file.replace(/\.jsonl$/, "");
-  }
+  if (target.agent === "claude" && pid) target.sessionId = sessionIdForPid(pid);
+  target.transcriptPath = locateTranscript(target);
+  // The app has no session id for Codex at all, and Claude's pid file can lag.
+  if (!target.transcriptPath) guessTranscript(target);
   return target;
 }

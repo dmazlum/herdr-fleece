@@ -26,12 +26,12 @@ function parseCommand(text) {
 function launch(argv) {
   const [bin, ...args] = argv;
   if (!bin) return Promise.reject(new Error("no command to open with"));
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     const child = spawn(bin, args, { detached: true, stdio: "ignore" });
     child.once("error", reject);
     child.once("spawn", () => {
       child.unref();
-      resolve3();
+      resolve4();
     });
   });
 }
@@ -224,41 +224,176 @@ function int(table, key) {
 }
 
 // src/core.ts
-import { execFile as execFile2 } from "node:child_process";
-import { readdirSync as readdirSync2, readFileSync as readFileSync2, statSync } from "node:fs";
-import { homedir as homedir3 } from "node:os";
-import { join as join3 } from "node:path";
-import { promisify as promisify2 } from "node:util";
-
-// src/resolve.ts
-import { existsSync, readdirSync } from "node:fs";
-import { homedir as homedir2 } from "node:os";
-import { join as join2 } from "node:path";
-
-// src/herdr.ts
 import { execFile } from "node:child_process";
+import { readFileSync as readFileSync2 } from "node:fs";
+import { join as join4 } from "node:path";
 import { promisify } from "node:util";
 
-// src/render/text.ts
-var ESC = String.fromCharCode(27);
-var RESET = `${ESC}[0m`;
-var COLOR = process.env.NO_COLOR === void 0;
+// src/transcript/agents.ts
+import { basename } from "node:path";
 
-// src/herdr.ts
-var run = promisify(execFile);
-var HERDR_BIN = process.env.HERDR_BIN_PATH ?? "herdr";
-var ESC2 = String.fromCharCode(27);
+// src/transcript/claude.ts
+var WRITE_TOOLS = {
+  Write: "file_path",
+  Edit: "file_path",
+  MultiEdit: "file_path",
+  NotebookEdit: "notebook_path"
+};
+var WRAPPER_TAGS = [
+  "system-reminder",
+  "local-command-caveat",
+  "local-command-stdout",
+  "command-message",
+  "command-args"
+];
+var ClaudeParser = class {
+  #closed = [];
+  #current = null;
+  ingest(value) {
+    if (typeof value !== "object" || value === null) return;
+    const record = value;
+    if (record.isSidechain === true) return;
+    if (record.type === "user" && isPrompt(record)) {
+      if (this.#current) this.#closed.push(finish(this.#current));
+      this.#current = startTurn(this.#closed.length + 1, record);
+      return;
+    }
+    if (record.type === "assistant" && this.#current) {
+      accumulate(this.#current, record);
+    }
+  }
+  snapshot() {
+    if (!this.#current) return this.#closed.slice();
+    return [...this.#closed, finish(cloneTurn(this.#current))];
+  }
+};
+var claudeParser = () => new ClaudeParser();
+function cloneTurn(turn) {
+  return {
+    ...turn,
+    toolUses: turn.toolUses.map((use) => ({ ...use })),
+    files: turn.files.map((file) => ({ ...file })),
+    usage: { ...turn.usage }
+  };
+}
+function isPrompt(record) {
+  if (record.isMeta === true) return false;
+  const content = record.message?.content;
+  if (typeof content === "string") return cleanPrompt(content) !== "";
+  if (!Array.isArray(content)) return false;
+  const blocks = content;
+  if (blocks.some((block) => block?.type === "tool_result")) return false;
+  return cleanPrompt(textOf(blocks)) !== "";
+}
+function startTurn(index, record) {
+  const content = record.message?.content;
+  const raw = typeof content === "string" ? content : textOf(content);
+  return {
+    index,
+    prompt: cleanPrompt(raw),
+    promptAt: record.timestamp,
+    text: "",
+    thinking: "",
+    toolUses: [],
+    files: [],
+    usage: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    gitBranch: record.gitBranch,
+    cwd: record.cwd,
+    agentVersion: record.version
+  };
+}
+function accumulate(turn, record) {
+  const content = record.message?.content;
+  const blocks = Array.isArray(content) ? content : typeof content === "string" ? [{ type: "text", text: content }] : [];
+  for (const block of blocks) {
+    if (!block) continue;
+    if (block.type === "text" && block.text) {
+      turn.text = turn.text === "" ? block.text : `${turn.text}
 
-// src/resolve.ts
+${block.text}`;
+    } else if (block.type === "thinking" && block.thinking) {
+      turn.thinking = turn.thinking === "" ? block.thinking : `${turn.thinking}
+
+${block.thinking}`;
+    } else if (block.type === "tool_use") {
+      const name = block.name ?? "tool";
+      addToolUse(turn.toolUses, name);
+      addFileEdit(turn.files, name, block.input);
+    }
+  }
+  if (record.message?.model) turn.model = record.message.model;
+  if (record.timestamp) turn.endedAt = record.timestamp;
+  if (record.gitBranch) turn.gitBranch = record.gitBranch;
+  addUsage(turn.usage, record.message?.usage);
+}
+function finish(turn) {
+  turn.text = turn.text.trim();
+  turn.thinking = turn.thinking.trim();
+  turn.files.sort((left, right) => right.edits - left.edits);
+  if (turn.promptAt && turn.endedAt) {
+    const ms = Date.parse(turn.endedAt) - Date.parse(turn.promptAt);
+    if (Number.isFinite(ms) && ms >= 0) turn.durationMs = ms;
+  }
+  return turn;
+}
+function addToolUse(uses, name) {
+  const existing = uses.find((use) => use.name === name);
+  if (existing) existing.count += 1;
+  else uses.push({ name, count: 1 });
+}
+function addFileEdit(files, name, input) {
+  const field = WRITE_TOOLS[name];
+  if (field === void 0 || typeof input !== "object" || input === null) return;
+  const path = input[field];
+  if (typeof path !== "string" || path.trim() === "") return;
+  const existing = files.find((file) => file.path === path);
+  if (existing) existing.edits += 1;
+  else files.push({ path, edits: 1 });
+}
+function addUsage(usage, raw) {
+  if (!raw) return;
+  usage.input += num(raw["input_tokens"]);
+  usage.output += num(raw["output_tokens"]);
+  usage.cacheRead += num(raw["cache_read_input_tokens"]);
+  usage.cacheCreation += num(raw["cache_creation_input_tokens"]);
+}
+function num(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+function textOf(blocks) {
+  if (!Array.isArray(blocks)) return "";
+  return blocks.filter((block) => block?.type === "text" && block.text).map((block) => block.text).join("\n\n");
+}
+function cleanPrompt(raw) {
+  let text = raw;
+  for (const tag of WRAPPER_TAGS) {
+    text = text.replace(new RegExp(`<${tag}>[\\s\\S]*?</${tag}>`, "g"), "");
+  }
+  text = text.replace(/<command-name>([\s\S]*?)<\/command-name>/g, (_m, name) => {
+    const trimmed = name.trim();
+    return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+  });
+  return text.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+// src/transcript/claude-files.ts
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import { join as join2 } from "node:path";
+function claudeHome() {
+  return process.env.CLAUDE_CONFIG_DIR ?? join2(homedir2(), ".claude");
+}
 function claudeProjectsDir() {
-  const base = process.env.CLAUDE_CONFIG_DIR ?? join2(homedir2(), ".claude");
-  return join2(base, "projects");
+  return join2(claudeHome(), "projects");
+}
+function projectDir(cwd) {
+  return join2(claudeProjectsDir(), cwd.replace(/[/.]/g, "-"));
 }
 function findClaudeTranscript(sessionId, cwd) {
   const projects = claudeProjectsDir();
   const file = `${sessionId}.jsonl`;
   if (cwd) {
-    const direct = join2(projects, cwd.replace(/[/.]/g, "-"), file);
+    const direct = join2(projectDir(cwd), file);
     if (existsSync(direct)) return direct;
   }
   let entries;
@@ -273,16 +408,675 @@ function findClaudeTranscript(sessionId, cwd) {
   }
   return null;
 }
+function newestClaudeTranscript(cwd) {
+  const dir = projectDir(cwd);
+  let best;
+  let entries;
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return void 0;
+  }
+  for (const entry of entries) {
+    if (!entry.endsWith(".jsonl")) continue;
+    const path = join2(dir, entry);
+    try {
+      const mtime = statSync(path).mtimeMs;
+      if (!best || mtime > best.mtime) best = { path, mtime };
+    } catch {
+    }
+  }
+  return best?.path;
+}
+
+// src/transcript/codex.ts
+import { isAbsolute, resolve as resolve2 } from "node:path";
+var ZERO = { input: 0, cached: 0, cacheWrite: 0, output: 0 };
+var UNAPPLIED = /* @__PURE__ */ new Set(["failed", "declined", "rejected"]);
+var PATCH_FAILED = /verification failed|failed to (?:apply|find|read|write)|^error\b|rejected|declined/im;
+function isSubagentSource(source) {
+  return typeof source === "object" && source !== null && "subagent" in source;
+}
+var PATCH_FILE = /^\*\*\* (Add|Update|Delete) File: (.+)$|^\*\*\* Move to: (.+)$/;
+var CodexParser = class {
+  #closed = [];
+  #current = null;
+  /** A subagent's rollout (a guardian review, a spawned worker) is not the user's conversation. */
+  #ignored = false;
+  #cwd;
+  #model;
+  #gitBranch;
+  #version;
+  #totals = { ...ZERO };
+  ingest(value) {
+    if (this.#ignored || typeof value !== "object" || value === null) return;
+    const record = value;
+    const payload = record.payload;
+    if (typeof payload !== "object" || payload === null) return;
+    switch (record.type) {
+      case "session_meta":
+        this.#meta(payload);
+        return;
+      case "turn_context":
+        this.#context(payload);
+        return;
+      case "event_msg":
+        this.#event(payload, record.timestamp);
+        return;
+      case "response_item":
+        this.#item(payload, record.timestamp);
+        return;
+    }
+  }
+  snapshot() {
+    if (!this.#current) return this.#closed.slice();
+    return [...this.#closed, finish2(cloneOpen(this.#current))];
+  }
+  #meta(payload) {
+    if (isSubagentSource(payload["source"])) {
+      this.#ignored = true;
+      return;
+    }
+    this.#cwd = str2(payload["cwd"]) ?? this.#cwd;
+    this.#version = str2(payload["cli_version"]) ?? this.#version;
+    const git = payload["git"];
+    if (typeof git === "object" && git !== null) {
+      this.#gitBranch = str2(git["branch"]) ?? this.#gitBranch;
+    }
+  }
+  /** Settings for the turn about to run. It lands before that turn's prompt. */
+  #context(payload) {
+    this.#cwd = str2(payload["cwd"]) ?? this.#cwd;
+    this.#model = str2(payload["model"]) ?? this.#model;
+  }
+  #event(payload, at) {
+    switch (payload["type"]) {
+      case "user_message": {
+        const kind = str2(payload["kind"]);
+        if (kind !== void 0 && kind !== "plain") return;
+        this.#prompt(str2(payload["message"]) ?? "", at);
+        return;
+      }
+      case "item_completed": {
+        const item = payload["item"];
+        if (typeof item !== "object" || item === null) return;
+        const typed = item;
+        if (typed["type"] === "UserMessage") this.#prompt(contentText(typed["content"]), at);
+        else if (typed["type"] === "FileChange" && this.#current) {
+          if (!UNAPPLIED.has(str2(typed["status"]) ?? "")) {
+            addChanges(this.#current.changed, typed["changes"]);
+          }
+          touch(this.#current, at);
+        }
+        return;
+      }
+      case "token_count": {
+        const totals = totalsOf(payload["info"]);
+        if (!totals) return;
+        this.#totals = totals;
+        if (this.#current) this.#current.latest = totals;
+        return;
+      }
+      case "task_complete": {
+        const open2 = this.#current;
+        if (!open2) return;
+        open2.lastAgentMessage = str2(payload["last_agent_message"]) ?? open2.lastAgentMessage;
+        open2.completedAt = at ?? open2.completedAt;
+        const ms = payload["duration_ms"];
+        if (typeof ms === "number" && Number.isFinite(ms) && ms >= 0) open2.turn.durationMs = ms;
+        touch(open2, at);
+        return;
+      }
+    }
+  }
+  #item(payload, at) {
+    const open2 = this.#current;
+    if (!open2) return;
+    switch (payload["type"]) {
+      case "message": {
+        if (payload["role"] !== "assistant") return;
+        const text = contentText(payload["content"]);
+        if (text === "") return;
+        open2.messages.push({ text, phase: str2(payload["phase"]), at });
+        touch(open2, at);
+        return;
+      }
+      case "reasoning": {
+        const summary = summaryText(payload["summary"]);
+        if (summary === "") return;
+        open2.turn.thinking = open2.turn.thinking === "" ? summary : `${open2.turn.thinking}
+
+${summary}`;
+        return;
+      }
+      case "function_call":
+      case "custom_tool_call": {
+        const name = str2(payload["name"]) ?? "tool";
+        addToolUse2(open2.turn.toolUses, name);
+        if (name === "apply_patch") {
+          const patch = patchText(payload["input"] ?? payload["arguments"]);
+          const paths = patchPaths(patch, open2.turn.cwd);
+          const callId = str2(payload["call_id"]);
+          if (callId === void 0) for (const path of paths) addFile(open2.patched, path);
+          else if (paths.length > 0) open2.pendingPatches.set(callId, paths);
+        }
+        touch(open2, at);
+        return;
+      }
+      case "function_call_output":
+      case "custom_tool_call_output": {
+        const callId = str2(payload["call_id"]);
+        const paths = callId === void 0 ? void 0 : open2.pendingPatches.get(callId);
+        if (!paths) return;
+        open2.pendingPatches.delete(callId);
+        if (patchApplied(payload["output"])) for (const path of paths) addFile(open2.patched, path);
+        return;
+      }
+      case "local_shell_call":
+        addToolUse2(open2.turn.toolUses, "shell");
+        touch(open2, at);
+        return;
+      case "web_search_call":
+        addToolUse2(open2.turn.toolUses, "web_search");
+        touch(open2, at);
+        return;
+    }
+  }
+  #prompt(raw, at) {
+    const prompt = raw.trim();
+    if (prompt === "") return;
+    const open2 = this.#current;
+    if (open2 && open2.turn.prompt === prompt && !hasActivity(open2)) return;
+    if (open2) this.#closed.push(finish2(open2));
+    this.#current = {
+      turn: {
+        index: this.#closed.length + 1,
+        prompt,
+        promptAt: at,
+        text: "",
+        thinking: "",
+        toolUses: [],
+        files: [],
+        usage: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+        model: this.#model,
+        gitBranch: this.#gitBranch,
+        cwd: this.#cwd,
+        agentVersion: this.#version
+      },
+      messages: [],
+      changed: [],
+      patched: [],
+      pendingPatches: /* @__PURE__ */ new Map(),
+      baseline: this.#totals,
+      latest: this.#totals
+    };
+  }
+};
+var codexParser = () => new CodexParser();
+function answerMessages(messages) {
+  if (messages.some((message2) => message2.phase !== void 0)) {
+    return messages.filter((message2) => message2.phase === "final_answer");
+  }
+  const last = messages.at(-1);
+  return last ? [last] : [];
+}
+function answerText(messages, lastAgentMessage) {
+  const text = answerMessages(messages).map((message2) => message2.text).join("\n\n").trim();
+  return text !== "" ? text : (lastAgentMessage ?? "").trim();
+}
+function answeredAt(open2) {
+  const own = answerMessages(open2.messages).filter((message2) => message2.text.trim() !== "");
+  if (own.length > 0) return own.at(-1).at ?? open2.lastActivity;
+  if (open2.lastAgentMessage?.trim()) return open2.completedAt ?? open2.lastActivity;
+  return open2.lastActivity;
+}
+function finish2(open2) {
+  const turn = open2.turn;
+  turn.text = answerText(open2.messages, open2.lastAgentMessage);
+  turn.endedAt = answeredAt(open2);
+  turn.thinking = turn.thinking.trim();
+  turn.files = (open2.changed.length > 0 ? open2.changed : open2.patched).slice();
+  turn.files.sort((left, right) => right.edits - left.edits);
+  turn.usage = usageBetween(open2.baseline, open2.latest);
+  const last = open2.completedAt ?? open2.lastActivity;
+  if (turn.durationMs === void 0 && turn.promptAt && last) {
+    const ms = Date.parse(last) - Date.parse(turn.promptAt);
+    if (Number.isFinite(ms) && ms >= 0) turn.durationMs = ms;
+  }
+  return turn;
+}
+function cloneOpen(open2) {
+  return {
+    ...open2,
+    turn: {
+      ...open2.turn,
+      toolUses: open2.turn.toolUses.map((use) => ({ ...use })),
+      files: [],
+      usage: { ...open2.turn.usage }
+    },
+    messages: open2.messages.slice(),
+    changed: open2.changed.map((file) => ({ ...file })),
+    patched: open2.patched.map((file) => ({ ...file })),
+    pendingPatches: new Map(open2.pendingPatches)
+  };
+}
+function hasActivity(open2) {
+  return open2.messages.length > 0 || open2.turn.toolUses.length > 0 || open2.changed.length > 0 || open2.turn.thinking !== "";
+}
+function touch(open2, at) {
+  if (at) open2.lastActivity = at;
+}
+function usageBetween(from, to) {
+  const delta = (key) => Math.max(0, to[key] - from[key]);
+  const cached = delta("cached");
+  return {
+    input: Math.max(0, delta("input") - cached),
+    output: delta("output"),
+    cacheRead: cached,
+    cacheCreation: delta("cacheWrite")
+  };
+}
+function totalsOf(info) {
+  if (typeof info !== "object" || info === null) return void 0;
+  const total = info["total_token_usage"];
+  if (typeof total !== "object" || total === null) return void 0;
+  const raw = total;
+  return {
+    input: num2(raw["input_tokens"]),
+    cached: num2(raw["cached_input_tokens"]),
+    cacheWrite: num2(raw["cache_write_input_tokens"]),
+    output: num2(raw["output_tokens"])
+  };
+}
+function addChanges(files, changes) {
+  if (typeof changes !== "object" || changes === null || Array.isArray(changes)) return;
+  for (const [path, change] of Object.entries(changes)) {
+    const detail = typeof change === "object" && change !== null ? change : {};
+    if (detail["type"] === "delete") continue;
+    addFile(files, str2(detail["move_path"]) ?? path);
+  }
+}
+function patchText(raw) {
+  if (typeof raw !== "string") return "";
+  if (raw.trimStart().startsWith("{")) {
+    try {
+      const parsed = JSON.parse(raw);
+      return str2(parsed["input"]) ?? str2(parsed["patch"]) ?? "";
+    } catch {
+      return raw;
+    }
+  }
+  return raw;
+}
+function patchApplied(output) {
+  let text = typeof output === "string" ? output : contentText(output);
+  if (text.trimStart().startsWith("{")) {
+    try {
+      const parsed = JSON.parse(text);
+      const metadata = parsed["metadata"];
+      if (typeof metadata === "object" && metadata !== null) {
+        const code = metadata["exit_code"];
+        if (typeof code === "number") return code === 0;
+      }
+      text = str2(parsed["output"]) ?? text;
+    } catch {
+    }
+  }
+  return !PATCH_FAILED.test(text);
+}
+function patchPaths(patch, cwd) {
+  const seen = /* @__PURE__ */ new Set();
+  let section2;
+  for (const line of patch.split("\n")) {
+    const match = PATCH_FILE.exec(line.trimEnd());
+    if (!match) continue;
+    const [, action, target, movedTo] = match;
+    const raw = (target ?? movedTo ?? "").trim();
+    if (raw === "") continue;
+    const path = isAbsolute(raw) || !cwd ? raw : resolve2(cwd, raw);
+    if (movedTo !== void 0) {
+      if (section2 !== void 0) seen.delete(section2);
+      seen.add(path);
+    } else if (action === "Delete") {
+      seen.delete(path);
+      section2 = void 0;
+    } else {
+      seen.add(path);
+      section2 = path;
+    }
+  }
+  return [...seen];
+}
+function addFile(files, path) {
+  if (path.trim() === "") return;
+  const existing = files.find((file) => file.path === path);
+  if (existing) existing.edits += 1;
+  else files.push({ path, edits: 1 });
+}
+function addToolUse2(uses, name) {
+  const existing = uses.find((use) => use.name === name);
+  if (existing) existing.count += 1;
+  else uses.push({ name, count: 1 });
+}
+function contentText(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map(
+    (part) => typeof part === "object" && part !== null ? str2(part["text"]) : void 0
+  ).filter((text) => text !== void 0 && text !== "").join("\n\n");
+}
+function summaryText(summary) {
+  if (!Array.isArray(summary)) return "";
+  return summary.map(
+    (part) => typeof part === "string" ? part : typeof part === "object" && part !== null ? str2(part["text"]) : void 0
+  ).filter((text) => text !== void 0 && text.trim() !== "").join("\n\n");
+}
+function str2(value) {
+  return typeof value === "string" ? value : void 0;
+}
+function num2(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+// src/transcript/codex-files.ts
+import { closeSync, existsSync as existsSync2, openSync, readdirSync as readdirSync2, readSync, statSync as statSync2 } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { join as join3 } from "node:path";
+function codexHome() {
+  return process.env.CODEX_HOME ?? join3(homedir3(), ".codex");
+}
+function codexSessionsDir() {
+  return join3(codexHome(), "sessions");
+}
+function archivedDir() {
+  return join3(codexHome(), "archived_sessions");
+}
+function codexSessionId(path) {
+  const match = /-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i.exec(path);
+  return match?.[1];
+}
+var found = /* @__PURE__ */ new Map();
+function findCodexTranscript(sessionId) {
+  if (sessionId === "" || /[/\\]/.test(sessionId)) return null;
+  const cached = found.get(sessionId);
+  if (cached && existsSync2(cached)) return cached;
+  const suffix = `-${sessionId}.jsonl`;
+  for (const dir of [...dayDirs(codexSessionsDir()), archivedDir()]) {
+    const name = list(dir).find((entry) => entry.startsWith("rollout-") && entry.endsWith(suffix));
+    if (name) {
+      const path = join3(dir, name);
+      found.set(sessionId, path);
+      return path;
+    }
+  }
+  return null;
+}
+var NEWEST_SCAN_LIMIT = 200;
+var NEWEST_OPEN_LIMIT = 1e3;
+function newestCodexTranscript(cwd) {
+  const candidates = [];
+  for (const dir of dayDirs(codexSessionsDir())) {
+    for (const entry of list(dir)) {
+      if (!entry.startsWith("rollout-") || !entry.endsWith(".jsonl")) continue;
+      const path = join3(dir, entry);
+      try {
+        candidates.push({ path, mtime: statSync2(path).mtimeMs });
+      } catch {
+      }
+    }
+  }
+  candidates.sort((left, right) => right.mtime - left.mtime);
+  let topLevel = 0;
+  for (const { path } of candidates.slice(0, NEWEST_OPEN_LIMIT)) {
+    const meta = sessionMeta(path);
+    if (!meta || meta.subagent) continue;
+    if (meta.cwd === cwd) return path;
+    if (++topLevel >= NEWEST_SCAN_LIMIT) break;
+  }
+  return void 0;
+}
+function dayDirs(root) {
+  const dirs = [];
+  for (const year of numbered(root)) {
+    for (const month of numbered(join3(root, year))) {
+      for (const day of numbered(join3(root, year, month))) {
+        dirs.push(join3(root, year, month, day));
+      }
+    }
+  }
+  return dirs;
+}
+function numbered(dir) {
+  return list(dir).filter((entry) => /^\d+$/.test(entry)).sort((left, right) => Number(right) - Number(left));
+}
+function list(dir) {
+  try {
+    return readdirSync2(dir);
+  } catch {
+    return [];
+  }
+}
+var META_HEAD_BYTES = 64 * 1024;
+function sessionMeta(path) {
+  const head = readHead(path);
+  if (head === void 0) return void 0;
+  const newline = head.indexOf("\n");
+  if (newline !== -1) {
+    try {
+      const record = JSON.parse(head.slice(0, newline));
+      if (record.type !== "session_meta" || typeof record.payload !== "object" || !record.payload) {
+        return void 0;
+      }
+      const cwd = record.payload["cwd"];
+      return {
+        cwd: typeof cwd === "string" ? cwd : void 0,
+        subagent: isSubagentSource(record.payload["source"])
+      };
+    } catch {
+      return void 0;
+    }
+  }
+  return scanMeta(head);
+}
+function scanMeta(head) {
+  if (!/^\{"(?:timestamp|type)"/.test(head) || !head.includes('"type":"session_meta"')) {
+    return void 0;
+  }
+  const match = /"cwd":("(?:[^"\\]|\\.)*")/.exec(head);
+  let cwd;
+  if (match) {
+    try {
+      cwd = JSON.parse(match[1]);
+    } catch {
+      cwd = void 0;
+    }
+  }
+  return { cwd, subagent: /"source":\{"subagent"/.test(head) };
+}
+function readHead(path) {
+  let fd;
+  try {
+    fd = openSync(path, "r");
+  } catch {
+    return void 0;
+  }
+  try {
+    const buf = Buffer.alloc(META_HEAD_BYTES);
+    const n = readSync(fd, buf, 0, buf.length, 0);
+    return n > 0 ? buf.subarray(0, n).toString("utf8") : void 0;
+  } catch {
+    return void 0;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+// src/transcript/reader.ts
+import { closeSync as closeSync2, openSync as openSync2, readSync as readSync2, statSync as statSync3 } from "node:fs";
+var PREFIX_BYTES = 32;
+function emptyCursor(parser) {
+  return {
+    offset: 0,
+    pending: Buffer.alloc(0),
+    parser,
+    ino: 0,
+    dev: 0,
+    mtimeMs: 0,
+    prefix: Buffer.alloc(0)
+  };
+}
+function readTurnsGrowing(path, createParser, previous) {
+  const info = statSync3(path);
+  const cursor = previous && canContinue(previous, info, path) ? previous : emptyCursor(createParser());
+  if (cursor.offset === info.size && cursor.pending.length === 0) {
+    return { turns: cursor.parser.snapshot(), cursor };
+  }
+  const fd = openSync2(path, "r");
+  try {
+    const length = info.size - cursor.offset;
+    if (length > 0) {
+      const chunk = Buffer.alloc(length);
+      let read = 0;
+      while (read < length) {
+        const n = readSync2(fd, chunk, read, length - read, cursor.offset + read);
+        if (n === 0) break;
+        read += n;
+      }
+      ingestBytes(cursor, chunk.subarray(0, read));
+      cursor.offset += read;
+    }
+    flushPending(cursor);
+    rememberFile(cursor, info, fd);
+  } finally {
+    closeSync2(fd);
+  }
+  return { turns: cursor.parser.snapshot(), cursor };
+}
+function canContinue(previous, info, path) {
+  if (previous.offset === 0) return true;
+  if (info.size < previous.offset) return false;
+  if (previous.ino !== 0 && (info.ino !== previous.ino || info.dev !== previous.dev)) return false;
+  if (info.size === previous.offset && info.mtimeMs !== previous.mtimeMs) return false;
+  if (previous.prefix.length === 0) return true;
+  const fd = openSync2(path, "r");
+  try {
+    const buf = Buffer.alloc(previous.prefix.length);
+    const n = readSync2(fd, buf, 0, buf.length, 0);
+    return n === previous.prefix.length && buf.equals(previous.prefix);
+  } finally {
+    closeSync2(fd);
+  }
+}
+function rememberFile(cursor, info, fd) {
+  cursor.ino = info.ino;
+  cursor.dev = info.dev;
+  cursor.mtimeMs = info.mtimeMs;
+  if (cursor.prefix.length > 0 || info.size === 0) return;
+  const n = Math.min(PREFIX_BYTES, info.size);
+  const buf = Buffer.alloc(n);
+  if (readSync2(fd, buf, 0, n, 0) === n) cursor.prefix = buf;
+}
+function flushPending(cursor) {
+  if (cursor.pending.length === 0) return;
+  const line = cursor.pending.toString("utf8");
+  if (line.trim() === "") {
+    cursor.pending = Buffer.alloc(0);
+    return;
+  }
+  const record = parseLine(line);
+  if (record === void 0) return;
+  cursor.parser.ingest(record);
+  cursor.pending = Buffer.alloc(0);
+}
+function ingestBytes(cursor, chunk) {
+  const data = cursor.pending.length === 0 ? chunk : Buffer.concat([cursor.pending, chunk]);
+  let start = 0;
+  for (let i = 0; i < data.length; i++) {
+    if (data[i] !== 10) continue;
+    const record = parseLine(data.subarray(start, i).toString("utf8"));
+    if (record !== void 0) cursor.parser.ingest(record);
+    start = i + 1;
+  }
+  cursor.pending = start === 0 ? data : Buffer.from(data.subarray(start));
+}
+function parseLine(line) {
+  if (line.trim() === "") return void 0;
+  try {
+    return JSON.parse(line);
+  } catch {
+    return void 0;
+  }
+}
+
+// src/transcript/agents.ts
+var claude = {
+  id: "claude",
+  label: "Claude Code",
+  createParser: claudeParser,
+  home: claudeProjectsDir,
+  find: findClaudeTranscript,
+  newest: newestClaudeTranscript,
+  sessionOf: (path) => basename(path, ".jsonl") || void 0
+};
+var codex = {
+  id: "codex",
+  label: "Codex",
+  createParser: codexParser,
+  home: codexSessionsDir,
+  find: (sessionId) => findCodexTranscript(sessionId),
+  newest: newestCodexTranscript,
+  sessionOf: codexSessionId
+};
+var AGENTS = [claude, codex];
+function agentTranscripts(agent) {
+  return AGENTS.find((entry) => entry.id === agent);
+}
+function supportedAgents() {
+  return AGENTS;
+}
+var TranscriptError = class extends Error {
+};
+function locateTranscript(target) {
+  const agent = agentTranscripts(target.agent);
+  if (!agent || !target.sessionId) return void 0;
+  return agent.find(target.sessionId, target.cwd) ?? void 0;
+}
+function guessTranscript(target) {
+  const agent = agentTranscripts(target.agent);
+  if (!agent || !target.cwd) return;
+  const path = agent.newest(target.cwd);
+  if (!path) return;
+  target.transcriptPath = path;
+  target.sessionId ??= agent.sessionOf(path);
+  target.guessed = true;
+}
+function describeTranscript(target) {
+  if (!target.transcriptPath) return "(not found)";
+  return target.guessed ? `${target.transcriptPath} (guessed from folder)` : target.transcriptPath;
+}
+function missingTranscript(target) {
+  const agent = agentTranscripts(target.agent);
+  if (!agent) {
+    const names = AGENTS.map((entry) => entry.label).join(" and ");
+    return `agent "${target.agent}" is not supported yet \u2014 Fleece reads ${names}`;
+  }
+  return `no ${agent.label} transcript for session ${target.sessionId ?? "?"} under ${agent.home()}`;
+}
+function readTargetTurns(target) {
+  const agent = agentTranscripts(target.agent);
+  if (!agent || !target.transcriptPath) throw new TranscriptError(missingTranscript(target));
+  return readTurnsGrowing(target.transcriptPath, agent.createParser).turns;
+}
 
 // src/core.ts
-var run2 = promisify2(execFile2);
+var run = promisify(execFile);
 var CoreError = class extends Error {
 };
 var HC_BIN = process.env.FLEECE_HC ?? "hc";
 async function coreTerminal(address) {
   let stdout;
   try {
-    ({ stdout } = await run2(HC_BIN, ["get", address, "--json"], { maxBuffer: 4 * 1024 * 1024 }));
+    ({ stdout } = await run(HC_BIN, ["get", address, "--json"], { maxBuffer: 4 * 1024 * 1024 }));
   } catch (err) {
     const message2 = err instanceof Error ? err.message : String(err);
     throw new CoreError(`hc get ${address} failed: ${message2}`);
@@ -304,37 +1098,28 @@ function isClaude(terminal) {
   const head = terminal.foreground?.argv?.[0] ?? "";
   return /(^|\/)claude$/.test(head);
 }
+function isCodex(terminal) {
+  const app = agentApp(terminal);
+  if (app === "codex" || app?.startsWith("codex-")) return true;
+  const [head = "", script = ""] = terminal.foreground?.argv ?? [];
+  if (/(^|\/)codex$/.test(head)) return true;
+  return /(^|\/)node$/.test(head) && /(^|\/)codex(\.js)?$/.test(script);
+}
+function terminalAgent(terminal) {
+  if (isClaude(terminal)) return "claude";
+  if (isCodex(terminal)) return "codex";
+  return agentApp(terminal) ?? "unknown";
+}
 function claudeSessionsDir() {
-  const base = process.env.CLAUDE_CONFIG_DIR ?? join3(homedir3(), ".claude");
-  return join3(base, "sessions");
+  return join4(claudeHome(), "sessions");
 }
 function sessionIdForPid(pid, read = (path) => readFileSync2(path, "utf8")) {
   try {
-    const record = JSON.parse(read(join3(claudeSessionsDir(), `${pid}.json`)));
+    const record = JSON.parse(read(join4(claudeSessionsDir(), `${pid}.json`)));
     return typeof record?.sessionId === "string" && record.sessionId !== "" ? record.sessionId : void 0;
   } catch {
     return void 0;
   }
-}
-function newestTranscript(cwd) {
-  const dir = join3(claudeProjectsDir(), cwd.replace(/[/.]/g, "-"));
-  let best;
-  let entries;
-  try {
-    entries = readdirSync2(dir);
-  } catch {
-    return void 0;
-  }
-  for (const entry of entries) {
-    if (!entry.endsWith(".jsonl")) continue;
-    const path = join3(dir, entry);
-    try {
-      const mtime = statSync(path).mtimeMs;
-      if (!best || mtime > best.mtime) best = { path, mtime };
-    } catch {
-    }
-  }
-  return best?.path;
 }
 async function resolveTerminal(address) {
   const terminal = await coreTerminal(address);
@@ -342,29 +1127,24 @@ async function resolveTerminal(address) {
   const target = {
     paneId: terminal.address ?? address,
     status: terminalState(terminal),
-    agent: isClaude(terminal) ? "claude" : agentApp(terminal) ?? "unknown",
+    agent: terminalAgent(terminal),
     cwd,
     title: terminal.title
   };
-  if (target.agent !== "claude") return target;
+  const agent = agentTranscripts(target.agent);
+  if (!agent) return target;
   const pid = terminal.foreground?.pid;
-  target.sessionId = pid ? sessionIdForPid(pid) : void 0;
-  if (target.sessionId) {
-    target.transcriptPath = findClaudeTranscript(target.sessionId, cwd) ?? void 0;
-  }
-  if (!target.transcriptPath && cwd) {
-    target.transcriptPath = newestTranscript(cwd);
-    const file = target.transcriptPath?.split("/").pop();
-    if (file) target.sessionId ??= file.replace(/\.jsonl$/, "");
-  }
+  if (target.agent === "claude" && pid) target.sessionId = sessionIdForPid(pid);
+  target.transcriptPath = locateTranscript(target);
+  if (!target.transcriptPath) guessTranscript(target);
   return target;
 }
 
 // src/export/clipboard.ts
-import { execFile as execFile3 } from "node:child_process";
-import { openSync, writeSync, closeSync } from "node:fs";
-import { promisify as promisify3 } from "node:util";
-var run3 = promisify3(execFile3);
+import { execFile as execFile2 } from "node:child_process";
+import { openSync as openSync3, writeSync, closeSync as closeSync3 } from "node:fs";
+import { promisify as promisify2 } from "node:util";
+var run2 = promisify2(execFile2);
 var TOOLS = {
   darwin: [["pbcopy"]],
   linux: [
@@ -383,7 +1163,7 @@ async function copyWithTool(text) {
     const [bin, ...args] = command;
     if (!bin) continue;
     try {
-      const child = run3(bin, args);
+      const child = run2(bin, args);
       child.child.stdin?.end(text);
       await child;
       return bin;
@@ -396,7 +1176,7 @@ function writeOsc52(text) {
   const payload = `\x1B]52;c;${Buffer.from(text, "utf8").toString("base64")}\x07`;
   let fd;
   try {
-    fd = openSync("/dev/tty", "w");
+    fd = openSync3("/dev/tty", "w");
   } catch {
     if (process.stdout.isTTY) {
       process.stdout.write(payload);
@@ -410,7 +1190,7 @@ function writeOsc52(text) {
   } catch {
     return false;
   } finally {
-    closeSync(fd);
+    closeSync3(fd);
   }
 }
 
@@ -451,7 +1231,7 @@ function codeOnly(markdown) {
 
 // src/export/markdown.ts
 import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { basename, join as join4 } from "node:path";
+import { basename as basename2, join as join5 } from "node:path";
 function buildMarkdown(turn, target, config) {
   const parts = [];
   if (config.frontMatter) parts.push(frontMatter(turn, target));
@@ -474,12 +1254,12 @@ ${turn.thinking}
 }
 async function saveMarkdown(turn, target, config) {
   mkdirSync(config.exportDir, { recursive: true });
-  const path = join4(config.exportDir, fileName(turn, target));
+  const path = join5(config.exportDir, fileName(turn, target));
   writeAtomic(path, buildMarkdown(turn, target, config));
   return path;
 }
 function fileName(turn, target) {
-  const project = slug(target.cwd ? basename(target.cwd) : "session");
+  const project = slug(target.cwd ? basename2(target.cwd) : "session");
   const session = slug(target.sessionId ?? target.paneId ?? "session").slice(0, 12);
   const index = String(turn.index).padStart(2, "0");
   return `${project}-${session}-turn${index}-${stamp(turn.endedAt)}.md`;
@@ -534,9 +1314,14 @@ function stamp(iso) {
 }
 
 // src/extract.ts
-import { existsSync as existsSync2 } from "node:fs";
+import { existsSync as existsSync3 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { join as join5, resolve as resolve2 } from "node:path";
+import { join as join6, resolve as resolve3 } from "node:path";
+
+// src/render/text.ts
+var ESC = String.fromCharCode(27);
+var RESET = `${ESC}[0m`;
+var COLOR = process.env.NO_COLOR === void 0;
 
 // src/render/markdown.ts
 function parseInline(text, base = {}) {
@@ -722,10 +1507,10 @@ var COMMAND_HEADS = /* @__PURE__ */ new Set([
 var MAX_PER_KIND = 12;
 var LONG_LINE = 800;
 function resolvePath(text, cwd) {
-  if (text.startsWith("~/")) return join5(homedir4(), text.slice(2));
+  if (text.startsWith("~/")) return join6(homedir4(), text.slice(2));
   if (text.startsWith("/")) return text;
   if (!cwd) return null;
-  return resolve2(cwd, text);
+  return resolve3(cwd, text);
 }
 function extractItems(turns, options = {}) {
   const answered = turns.filter((turn) => turn.text !== "");
@@ -739,7 +1524,7 @@ function extractItems(turns, options = {}) {
     seen.add(key);
     items.push(item);
   };
-  const exists = options.exists ?? existsSync2;
+  const exists = options.exists ?? existsSync3;
   const edited = /* @__PURE__ */ new Set();
   const scopes = recent.map((turn) => {
     const base = turn.cwd ?? options.cwd;
@@ -874,8 +1659,8 @@ function withoutFences(text) {
 }
 
 // src/journal.ts
-import { existsSync as existsSync3, mkdirSync as mkdirSync2, statSync as statSync2 } from "node:fs";
-import { join as join6 } from "node:path";
+import { existsSync as existsSync4, mkdirSync as mkdirSync2, statSync as statSync4 } from "node:fs";
+import { join as join7 } from "node:path";
 var QUIET_MS = 1e3;
 function isSettled(status, lastWriteMs, now = Date.now()) {
   if (status !== "idle" && status !== "done") return false;
@@ -884,7 +1669,7 @@ function isSettled(status, lastWriteMs, now = Date.now()) {
 function transcriptSettled(target, now = Date.now()) {
   let lastWriteMs;
   try {
-    lastWriteMs = target.transcriptPath ? statSync2(target.transcriptPath).mtimeMs : void 0;
+    lastWriteMs = target.transcriptPath ? statSync4(target.transcriptPath).mtimeMs : void 0;
   } catch {
     lastWriteMs = void 0;
   }
@@ -894,7 +1679,7 @@ var DISK = {
   ensureDir(path) {
     mkdirSync2(path, { recursive: true });
   },
-  exists: existsSync3,
+  exists: existsSync4,
   write(path, text) {
     writeAtomic(path, text);
   }
@@ -914,7 +1699,7 @@ function journalTurns(turns, target, config, options) {
     return result;
   }
   for (const turn of answered) {
-    const path = join6(config.exportDir, fileName(turn, target));
+    const path = join7(config.exportDir, fileName(turn, target));
     if (io.exists(path)) {
       result.skipped += 1;
       continue;
@@ -933,250 +1718,6 @@ function journalSummary(result) {
   if (count === 0) return result.failed > 0 ? `journal failed \xD7${result.failed}` : void 0;
   const wrote = `journalled ${count} answer${count === 1 ? "" : "s"}`;
   return result.failed > 0 ? `${wrote} \xB7 ${result.failed} failed` : wrote;
-}
-
-// src/transcript/reader.ts
-import { closeSync as closeSync2, openSync as openSync2, readSync, statSync as statSync3 } from "node:fs";
-var PREFIX_BYTES = 32;
-function emptyCursor(parser) {
-  return {
-    offset: 0,
-    pending: Buffer.alloc(0),
-    parser,
-    ino: 0,
-    dev: 0,
-    mtimeMs: 0,
-    prefix: Buffer.alloc(0)
-  };
-}
-function readTurnsGrowing(path, createParser, previous) {
-  const info = statSync3(path);
-  const cursor = previous && canContinue(previous, info, path) ? previous : emptyCursor(createParser());
-  if (cursor.offset === info.size && cursor.pending.length === 0) {
-    return { turns: cursor.parser.snapshot(), cursor };
-  }
-  const fd = openSync2(path, "r");
-  try {
-    const length = info.size - cursor.offset;
-    if (length > 0) {
-      const chunk = Buffer.alloc(length);
-      let read = 0;
-      while (read < length) {
-        const n = readSync(fd, chunk, read, length - read, cursor.offset + read);
-        if (n === 0) break;
-        read += n;
-      }
-      ingestBytes(cursor, chunk.subarray(0, read));
-      cursor.offset += read;
-    }
-    flushPending(cursor);
-    rememberFile(cursor, info, fd);
-  } finally {
-    closeSync2(fd);
-  }
-  return { turns: cursor.parser.snapshot(), cursor };
-}
-function canContinue(previous, info, path) {
-  if (previous.offset === 0) return true;
-  if (info.size < previous.offset) return false;
-  if (previous.ino !== 0 && (info.ino !== previous.ino || info.dev !== previous.dev)) return false;
-  if (info.size === previous.offset && info.mtimeMs !== previous.mtimeMs) return false;
-  if (previous.prefix.length === 0) return true;
-  const fd = openSync2(path, "r");
-  try {
-    const buf = Buffer.alloc(previous.prefix.length);
-    const n = readSync(fd, buf, 0, buf.length, 0);
-    return n === previous.prefix.length && buf.equals(previous.prefix);
-  } finally {
-    closeSync2(fd);
-  }
-}
-function rememberFile(cursor, info, fd) {
-  cursor.ino = info.ino;
-  cursor.dev = info.dev;
-  cursor.mtimeMs = info.mtimeMs;
-  if (cursor.prefix.length > 0 || info.size === 0) return;
-  const n = Math.min(PREFIX_BYTES, info.size);
-  const buf = Buffer.alloc(n);
-  if (readSync(fd, buf, 0, n, 0) === n) cursor.prefix = buf;
-}
-function flushPending(cursor) {
-  if (cursor.pending.length === 0) return;
-  const line = cursor.pending.toString("utf8");
-  if (line.trim() === "") {
-    cursor.pending = Buffer.alloc(0);
-    return;
-  }
-  const record = parseLine(line);
-  if (record === void 0) return;
-  cursor.parser.ingest(record);
-  cursor.pending = Buffer.alloc(0);
-}
-function ingestBytes(cursor, chunk) {
-  const data = cursor.pending.length === 0 ? chunk : Buffer.concat([cursor.pending, chunk]);
-  let start = 0;
-  for (let i = 0; i < data.length; i++) {
-    if (data[i] !== 10) continue;
-    const record = parseLine(data.subarray(start, i).toString("utf8"));
-    if (record !== void 0) cursor.parser.ingest(record);
-    start = i + 1;
-  }
-  cursor.pending = start === 0 ? data : Buffer.from(data.subarray(start));
-}
-function parseLine(line) {
-  if (line.trim() === "") return void 0;
-  try {
-    return JSON.parse(line);
-  } catch {
-    return void 0;
-  }
-}
-
-// src/transcript/claude.ts
-var WRITE_TOOLS = {
-  Write: "file_path",
-  Edit: "file_path",
-  MultiEdit: "file_path",
-  NotebookEdit: "notebook_path"
-};
-var WRAPPER_TAGS = [
-  "system-reminder",
-  "local-command-caveat",
-  "local-command-stdout",
-  "command-message",
-  "command-args"
-];
-var ClaudeParser = class {
-  #closed = [];
-  #current = null;
-  ingest(value) {
-    if (typeof value !== "object" || value === null) return;
-    const record = value;
-    if (record.isSidechain === true) return;
-    if (record.type === "user" && isPrompt(record)) {
-      if (this.#current) this.#closed.push(finish(this.#current));
-      this.#current = startTurn(this.#closed.length + 1, record);
-      return;
-    }
-    if (record.type === "assistant" && this.#current) {
-      accumulate(this.#current, record);
-    }
-  }
-  snapshot() {
-    if (!this.#current) return this.#closed.slice();
-    return [...this.#closed, finish(cloneTurn(this.#current))];
-  }
-};
-var claudeParser = () => new ClaudeParser();
-function readTurns(path) {
-  return readTurnsGrowing(path, claudeParser).turns;
-}
-function cloneTurn(turn) {
-  return {
-    ...turn,
-    toolUses: turn.toolUses.map((use) => ({ ...use })),
-    files: turn.files.map((file) => ({ ...file })),
-    usage: { ...turn.usage }
-  };
-}
-function isPrompt(record) {
-  if (record.isMeta === true) return false;
-  const content = record.message?.content;
-  if (typeof content === "string") return cleanPrompt(content) !== "";
-  if (!Array.isArray(content)) return false;
-  const blocks = content;
-  if (blocks.some((block) => block?.type === "tool_result")) return false;
-  return cleanPrompt(textOf(blocks)) !== "";
-}
-function startTurn(index, record) {
-  const content = record.message?.content;
-  const raw = typeof content === "string" ? content : textOf(content);
-  return {
-    index,
-    prompt: cleanPrompt(raw),
-    promptAt: record.timestamp,
-    text: "",
-    thinking: "",
-    toolUses: [],
-    files: [],
-    usage: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
-    gitBranch: record.gitBranch,
-    cwd: record.cwd,
-    agentVersion: record.version
-  };
-}
-function accumulate(turn, record) {
-  const content = record.message?.content;
-  const blocks = Array.isArray(content) ? content : typeof content === "string" ? [{ type: "text", text: content }] : [];
-  for (const block of blocks) {
-    if (!block) continue;
-    if (block.type === "text" && block.text) {
-      turn.text = turn.text === "" ? block.text : `${turn.text}
-
-${block.text}`;
-    } else if (block.type === "thinking" && block.thinking) {
-      turn.thinking = turn.thinking === "" ? block.thinking : `${turn.thinking}
-
-${block.thinking}`;
-    } else if (block.type === "tool_use") {
-      const name = block.name ?? "tool";
-      addToolUse(turn.toolUses, name);
-      addFileEdit(turn.files, name, block.input);
-    }
-  }
-  if (record.message?.model) turn.model = record.message.model;
-  if (record.timestamp) turn.endedAt = record.timestamp;
-  if (record.gitBranch) turn.gitBranch = record.gitBranch;
-  addUsage(turn.usage, record.message?.usage);
-}
-function finish(turn) {
-  turn.text = turn.text.trim();
-  turn.thinking = turn.thinking.trim();
-  turn.files.sort((left, right) => right.edits - left.edits);
-  if (turn.promptAt && turn.endedAt) {
-    const ms = Date.parse(turn.endedAt) - Date.parse(turn.promptAt);
-    if (Number.isFinite(ms) && ms >= 0) turn.durationMs = ms;
-  }
-  return turn;
-}
-function addToolUse(uses, name) {
-  const existing = uses.find((use) => use.name === name);
-  if (existing) existing.count += 1;
-  else uses.push({ name, count: 1 });
-}
-function addFileEdit(files, name, input) {
-  const field = WRITE_TOOLS[name];
-  if (field === void 0 || typeof input !== "object" || input === null) return;
-  const path = input[field];
-  if (typeof path !== "string" || path.trim() === "") return;
-  const existing = files.find((file) => file.path === path);
-  if (existing) existing.edits += 1;
-  else files.push({ path, edits: 1 });
-}
-function addUsage(usage, raw) {
-  if (!raw) return;
-  usage.input += num(raw["input_tokens"]);
-  usage.output += num(raw["output_tokens"]);
-  usage.cacheRead += num(raw["cache_read_input_tokens"]);
-  usage.cacheCreation += num(raw["cache_creation_input_tokens"]);
-}
-function num(value) {
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
-}
-function textOf(blocks) {
-  if (!Array.isArray(blocks)) return "";
-  return blocks.filter((block) => block?.type === "text" && block.text).map((block) => block.text).join("\n\n");
-}
-function cleanPrompt(raw) {
-  let text = raw;
-  for (const tag of WRAPPER_TAGS) {
-    text = text.replace(new RegExp(`<${tag}>[\\s\\S]*?</${tag}>`, "g"), "");
-  }
-  text = text.replace(/<command-name>([\s\S]*?)<\/command-name>/g, (_m, name) => {
-    const trimmed = name.trim();
-    return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
-  });
-  return text.replace(/\n{3,}/g, "\n\n").trim();
 }
 
 // src/window.ts
@@ -1285,18 +1826,16 @@ async function open(flags, config) {
   return { ok: true, message: `opened ${flags.target}` };
 }
 async function doctor(flags, config) {
-  const lines = [
-    ["export dir", config.exportDir],
-    ["claude projects", claudeProjectsDir()]
-  ];
+  const lines = [["export dir", config.exportDir]];
+  for (const agent of supportedAgents()) lines.push([`${agent.id} home`, agent.home()]);
   for (const problem of config.keyProblems) lines.push(["keys", `IGNORED: ${problem}`]);
   try {
     const target = await resolveTerminal(requireTerminal(flags));
     lines.push(["terminal", target.paneId], ["agent", target.agent]);
     lines.push(["session", target.sessionId ?? "(none)"], ["cwd", target.cwd ?? "(unknown)"]);
-    lines.push(["transcript", target.transcriptPath ?? "(not found)"]);
+    lines.push(["transcript", describeTranscript(target)]);
     if (target.transcriptPath) {
-      const turns = readTurns(target.transcriptPath);
+      const turns = readTargetTurns(target);
       lines.push(["turns", `${turns.length} (${answers(turns).length} with an answer)`]);
     }
   } catch (err) {
@@ -1306,13 +1845,8 @@ async function doctor(flags, config) {
 }
 async function load(flags) {
   const target = await resolveTerminal(requireTerminal(flags));
-  if (target.agent !== "claude") {
-    throw new EngineError(`agent "${target.agent}" is not supported yet \u2014 Fleece reads Claude Code`);
-  }
-  if (!target.transcriptPath) {
-    throw new EngineError(`no Claude transcript for ${target.paneId} under ${claudeProjectsDir()}`);
-  }
-  return { target, turns: readTurns(target.transcriptPath) };
+  if (!target.transcriptPath) throw new EngineError(missingTranscript(target));
+  return { target, turns: readTargetTurns(target) };
 }
 function requireTerminal(flags) {
   if (!flags.terminal) throw new EngineError("--terminal is required");

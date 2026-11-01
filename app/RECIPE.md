@@ -1,6 +1,6 @@
 # Fleece
 
-Fleece pulls things out of a Claude Code agent's answers. A dock pane next to the agent
+Fleece pulls things out of a Claude Code or Codex agent's answers. A dock pane next to the agent
 lists the files it edited, plus the code, commands, paths and links from its last few
 turns. Click a row to copy it. A frame dialog shows the whole answer as rendered Markdown.
 Copy and save always use the raw Markdown from the session transcript, not the terminal
@@ -62,10 +62,13 @@ screen.
   `exec("node", [appHome() + "/mods/fleece/engine.mjs", ...])` and reads one JSON line
   back. Its commands are `state`, `copy`, `clip`, `save`, `journal`, `open` and `doctor`,
   each with `--terminal tN`.
-- The engine resolves the terminal like this: `hc get tN --json` gives the foreground
-  pid, then `~/.claude/sessions/<pid>.json` gives the `sessionId`, then
-  `~/.claude/projects/*/<sessionId>.jsonl`. If there's no session file, it falls back to
-  the newest transcript for the cwd.
+- The engine resolves the terminal like this: `hc get tN --json` gives the agent (the
+  app it reports, else its argv) and the foreground pid.
+  - Claude Code: `~/.claude/sessions/<pid>.json` gives the `sessionId`, then
+    `~/.claude/projects/*/<sessionId>.jsonl`. If there's no session file, it falls back
+    to the newest transcript for the cwd.
+  - Codex keeps no per-pid file, so it takes the newest top-level rollout for the cwd
+    under `~/.codex/sessions` (or `$CODEX_HOME/sessions`), skipping subagent ones.
 - herdr calls used: `agents()`, `focused()`, `panes()`, `exec`, `openOverlay`,
   `closeOverlay`, `notify`, `nextCommand` (`fleece.copy`, `copy-code`, `save`,
   `journal`, `frame`, `reload`), and `run("pane.focus" | "terminal.paste" | "pane.split")`.
@@ -73,10 +76,13 @@ screen.
 
 ## Watch out
 
-- The mod reaches outside its folder. It reads `~/.claude`, runs `node` and `hc`, writes
-  exports to `export_dir` (default `~/Documents/fleece`), and writes the clipboard.
-- Only Claude Code on this machine is supported. Agents on another machine (`vps/t7`)
-  show a notice.
+- The mod reaches outside its folder. It reads `~/.claude` and `~/.codex`, runs `node`
+  and `hc`, writes exports to `export_dir` (default `~/Documents/fleece`), and writes the
+  clipboard.
+- Only Claude Code and Codex on this machine are supported. Agents on another machine
+  (`vps/t7`) show a notice.
+- Two Codex sessions in one folder share the newest-rollout guess; `doctor` marks it
+  `(guessed from folder)`.
 - `exec` has a 30s limit and 8 MiB of output. The engine returns only one window of
   answers.
 - `<mod>.<command>` keys reach a shown dock only.
@@ -85,7 +91,7 @@ screen.
 ## Done when
 
 - `herdr-app check ~/.config/herdr-app/mods/fleece` passes.
-- `herdr-app do pane.split --direction right --mod fleece` beside a Claude Code agent
+- `herdr-app do pane.split --direction right --mod fleece` beside a Claude Code or Codex agent
   lists the files it edited in its last turns.
 - `mod.open:fleece` over that agent renders its last answer, and `y` puts the raw
   Markdown on the clipboard (`pbpaste`).
