@@ -4,6 +4,8 @@
 
 Frame your agent's last answer in [Herdr](https://herdr.dev), then copy, save, or send it.
 
+![Fleece: the dock beside a Claude Code agent, with the frame showing its last answer](app/preview.png)
+
 A coding agent writes its best prose once and then scrolls it away. Fleece reads the
 session transcript — not the pane — and hands the answer back as raw Markdown.
 
