@@ -913,42 +913,25 @@ function journalSummary(result) {
   return result.failed > 0 ? `${wrote} \xB7 ${result.failed} failed` : wrote;
 }
 
-// src/transcript/claude.ts
+// src/transcript/reader.ts
 import { closeSync as closeSync2, openSync as openSync2, readSync, statSync as statSync2 } from "node:fs";
-var WRITE_TOOLS = {
-  Write: "file_path",
-  Edit: "file_path",
-  MultiEdit: "file_path",
-  NotebookEdit: "notebook_path"
-};
-var WRAPPER_TAGS = [
-  "system-reminder",
-  "local-command-caveat",
-  "local-command-stdout",
-  "command-message",
-  "command-args"
-];
 var PREFIX_BYTES = 32;
-function emptyCursor() {
+function emptyCursor(parser) {
   return {
     offset: 0,
     pending: Buffer.alloc(0),
-    closed: [],
-    current: null,
+    parser,
     ino: 0,
     dev: 0,
     mtimeMs: 0,
     prefix: Buffer.alloc(0)
   };
 }
-function readTurns(path) {
-  return readTurnsGrowing(path).turns;
-}
-function readTurnsGrowing(path, previous) {
+function readTurnsGrowing(path, createParser, previous) {
   const info = statSync2(path);
-  const cursor = previous && canContinue(previous, info, path) ? previous : emptyCursor();
+  const cursor = previous && canContinue(previous, info, path) ? previous : emptyCursor(createParser());
   if (cursor.offset === info.size && cursor.pending.length === 0) {
-    return { turns: snapshot(cursor), cursor };
+    return { turns: cursor.parser.snapshot(), cursor };
   }
   const fd = openSync2(path, "r");
   try {
@@ -969,7 +952,7 @@ function readTurnsGrowing(path, previous) {
   } finally {
     closeSync2(fd);
   }
-  return { turns: snapshot(cursor), cursor };
+  return { turns: cursor.parser.snapshot(), cursor };
 }
 function canContinue(previous, info, path) {
   if (previous.offset === 0) return true;
@@ -1002,12 +985,9 @@ function flushPending(cursor) {
     cursor.pending = Buffer.alloc(0);
     return;
   }
-  try {
-    JSON.parse(line);
-  } catch {
-    return;
-  }
-  ingestLine(cursor, line);
+  const record = parseLine(line);
+  if (record === void 0) return;
+  cursor.parser.ingest(record);
   cursor.pending = Buffer.alloc(0);
 }
 function ingestBytes(cursor, chunk) {
@@ -1015,32 +995,59 @@ function ingestBytes(cursor, chunk) {
   let start = 0;
   for (let i = 0; i < data.length; i++) {
     if (data[i] !== 10) continue;
-    ingestLine(cursor, data.subarray(start, i).toString("utf8"));
+    const record = parseLine(data.subarray(start, i).toString("utf8"));
+    if (record !== void 0) cursor.parser.ingest(record);
     start = i + 1;
   }
   cursor.pending = start === 0 ? data : Buffer.from(data.subarray(start));
 }
-function ingestLine(cursor, line) {
-  if (line.trim() === "") return;
-  let record;
+function parseLine(line) {
+  if (line.trim() === "") return void 0;
   try {
-    record = JSON.parse(line);
+    return JSON.parse(line);
   } catch {
-    return;
-  }
-  if (record.isSidechain === true) return;
-  if (record.type === "user" && isPrompt(record)) {
-    if (cursor.current) cursor.closed.push(finish(cursor.current));
-    cursor.current = startTurn(cursor.closed.length + 1, record);
-    return;
-  }
-  if (record.type === "assistant" && cursor.current) {
-    accumulate(cursor.current, record);
+    return void 0;
   }
 }
-function snapshot(cursor) {
-  if (!cursor.current) return cursor.closed.slice();
-  return [...cursor.closed, finish(cloneTurn(cursor.current))];
+
+// src/transcript/claude.ts
+var WRITE_TOOLS = {
+  Write: "file_path",
+  Edit: "file_path",
+  MultiEdit: "file_path",
+  NotebookEdit: "notebook_path"
+};
+var WRAPPER_TAGS = [
+  "system-reminder",
+  "local-command-caveat",
+  "local-command-stdout",
+  "command-message",
+  "command-args"
+];
+var ClaudeParser = class {
+  #closed = [];
+  #current = null;
+  ingest(value) {
+    if (typeof value !== "object" || value === null) return;
+    const record = value;
+    if (record.isSidechain === true) return;
+    if (record.type === "user" && isPrompt(record)) {
+      if (this.#current) this.#closed.push(finish(this.#current));
+      this.#current = startTurn(this.#closed.length + 1, record);
+      return;
+    }
+    if (record.type === "assistant" && this.#current) {
+      accumulate(this.#current, record);
+    }
+  }
+  snapshot() {
+    if (!this.#current) return this.#closed.slice();
+    return [...this.#closed, finish(cloneTurn(this.#current))];
+  }
+};
+var claudeParser = () => new ClaudeParser();
+function readTurns(path) {
+  return readTurnsGrowing(path, claudeParser).turns;
 }
 function cloneTurn(turn) {
   return {

@@ -1,4 +1,10 @@
-import { closeSync, openSync, readSync, statSync, type Stats } from "node:fs";
+import {
+  parseTranscript,
+  readTurnsGrowing as readGrowing,
+  TranscriptWatch as Watch,
+  type TranscriptCursor,
+  type TurnParser,
+} from "./reader.js";
 import type { FileEdit, TokenUsage, ToolUse, Turn } from "./types.js";
 
 /**
@@ -52,183 +58,58 @@ const WRAPPER_TAGS = [
   "command-args",
 ];
 
-export interface TranscriptCursor {
-  /** Bytes already read from the file, including an incomplete trailing line. */
-  offset: number;
-  pending: Buffer;
-  closed: Turn[];
-  current: Turn | null;
-  ino: number;
-  dev: number;
-  mtimeMs: number;
-  prefix: Buffer;
+/** Builds turns from Claude Code records: a prompt opens a turn, assistant records fill it. */
+class ClaudeParser implements TurnParser {
+  #closed: Turn[] = [];
+  #current: Turn | null = null;
+
+  ingest(value: unknown): void {
+    if (typeof value !== "object" || value === null) return;
+    const record = value as RawRecord;
+
+    // Subagent traffic belongs to a different conversation.
+    if (record.isSidechain === true) return;
+
+    if (record.type === "user" && isPrompt(record)) {
+      if (this.#current) this.#closed.push(finish(this.#current));
+      this.#current = startTurn(this.#closed.length + 1, record);
+      return;
+    }
+
+    if (record.type === "assistant" && this.#current) {
+      accumulate(this.#current, record);
+    }
+  }
+
+  snapshot(): Turn[] {
+    if (!this.#current) return this.#closed.slice();
+    return [...this.#closed, finish(cloneTurn(this.#current))];
+  }
 }
 
-const PREFIX_BYTES = 32;
-
-export function emptyCursor(): TranscriptCursor {
-  return {
-    offset: 0,
-    pending: Buffer.alloc(0),
-    closed: [],
-    current: null,
-    ino: 0,
-    dev: 0,
-    mtimeMs: 0,
-    prefix: Buffer.alloc(0),
-  };
-}
+export const claudeParser = (): TurnParser => new ClaudeParser();
 
 export function readTurns(path: string): Turn[] {
-  return readTurnsGrowing(path).turns;
+  return readGrowing(path, claudeParser).turns;
 }
 
-/**
- * Continues a previous read when the transcript has only grown. A shrink or
- * rewrite starts over. The dock calls this on every refresh so a long session
- * is not re-parsed from byte zero each time.
- */
+/** See {@link readGrowing}; bound to the Claude parser. */
 export function readTurnsGrowing(
   path: string,
   previous?: TranscriptCursor | null,
 ): { turns: Turn[]; cursor: TranscriptCursor } {
-  const info = statSync(path);
-  const cursor = previous && canContinue(previous, info, path) ? previous : emptyCursor();
-  if (cursor.offset === info.size && cursor.pending.length === 0) {
-    return { turns: snapshot(cursor), cursor };
-  }
-
-  const fd = openSync(path, "r");
-  try {
-    const length = info.size - cursor.offset;
-    if (length > 0) {
-      const chunk = Buffer.alloc(length);
-      let read = 0;
-      while (read < length) {
-        const n = readSync(fd, chunk, read, length - read, cursor.offset + read);
-        if (n === 0) break;
-        read += n;
-      }
-      ingestBytes(cursor, chunk.subarray(0, read));
-      cursor.offset += read;
-    }
-    flushPending(cursor);
-    rememberFile(cursor, info, fd);
-  } finally {
-    closeSync(fd);
-  }
-  return { turns: snapshot(cursor), cursor };
+  return readGrowing(path, claudeParser, previous);
 }
 
-/** Keeps a cursor against one path so the dock does not hold parser state itself. */
-export class TranscriptWatch {
-  #cursor: TranscriptCursor | null = null;
-  #path = "";
-
-  read(path: string, force = false): Turn[] {
-    if (force || path !== this.#path) {
-      this.#cursor = null;
-      this.#path = path;
-    }
-    const loaded = readTurnsGrowing(path, this.#cursor);
-    this.#cursor = loaded.cursor;
-    return loaded.turns;
-  }
-
-  reset(): void {
-    this.#cursor = null;
-    this.#path = "";
+/** A {@link Watch} over a Claude Code transcript. */
+export class TranscriptWatch extends Watch {
+  constructor() {
+    super(claudeParser);
   }
 }
 
 export function parseClaudeTranscript(source: string): Turn[] {
-  const cursor = emptyCursor();
-  ingestBytes(cursor, Buffer.from(source, "utf8"));
-  flushPending(cursor);
-  return snapshot(cursor);
-}
-
-function canContinue(previous: TranscriptCursor, info: Stats, path: string): boolean {
-  if (previous.offset === 0) return true;
-  if (info.size < previous.offset) return false;
-  if (previous.ino !== 0 && (info.ino !== previous.ino || info.dev !== previous.dev)) return false;
-  if (info.size === previous.offset && info.mtimeMs !== previous.mtimeMs) return false;
-  if (previous.prefix.length === 0) return true;
-
-  const fd = openSync(path, "r");
-  try {
-    const buf = Buffer.alloc(previous.prefix.length);
-    const n = readSync(fd, buf, 0, buf.length, 0);
-    return n === previous.prefix.length && buf.equals(previous.prefix);
-  } finally {
-    closeSync(fd);
-  }
-}
-
-function rememberFile(cursor: TranscriptCursor, info: Stats, fd: number): void {
-  cursor.ino = info.ino;
-  cursor.dev = info.dev;
-  cursor.mtimeMs = info.mtimeMs;
-  if (cursor.prefix.length > 0 || info.size === 0) return;
-  const n = Math.min(PREFIX_BYTES, info.size);
-  const buf = Buffer.alloc(n);
-  if (readSync(fd, buf, 0, n, 0) === n) cursor.prefix = buf;
-}
-
-function flushPending(cursor: TranscriptCursor): void {
-  if (cursor.pending.length === 0) return;
-  const line = cursor.pending.toString("utf8");
-  if (line.trim() === "") {
-    cursor.pending = Buffer.alloc(0);
-    return;
-  }
-  try {
-    JSON.parse(line);
-  } catch {
-    return;
-  }
-  ingestLine(cursor, line);
-  cursor.pending = Buffer.alloc(0);
-}
-
-function ingestBytes(cursor: TranscriptCursor, chunk: Buffer): void {
-  const data = cursor.pending.length === 0 ? chunk : Buffer.concat([cursor.pending, chunk]);
-  let start = 0;
-  for (let i = 0; i < data.length; i++) {
-    if (data[i] !== 0x0a) continue;
-    ingestLine(cursor, data.subarray(start, i).toString("utf8"));
-    start = i + 1;
-  }
-  cursor.pending = start === 0 ? data : Buffer.from(data.subarray(start));
-}
-
-function ingestLine(cursor: TranscriptCursor, line: string): void {
-  if (line.trim() === "") return;
-
-  let record: RawRecord;
-  try {
-    record = JSON.parse(line) as RawRecord;
-  } catch {
-    return; // A truncated trailing line is normal while a session is live.
-  }
-
-  // Subagent traffic belongs to a different conversation.
-  if (record.isSidechain === true) return;
-
-  if (record.type === "user" && isPrompt(record)) {
-    if (cursor.current) cursor.closed.push(finish(cursor.current));
-    cursor.current = startTurn(cursor.closed.length + 1, record);
-    return;
-  }
-
-  if (record.type === "assistant" && cursor.current) {
-    accumulate(cursor.current, record);
-  }
-}
-
-function snapshot(cursor: TranscriptCursor): Turn[] {
-  if (!cursor.current) return cursor.closed.slice();
-  return [...cursor.closed, finish(cloneTurn(cursor.current))];
+  return parseTranscript(source, claudeParser);
 }
 
 function cloneTurn(turn: Turn): Turn {
