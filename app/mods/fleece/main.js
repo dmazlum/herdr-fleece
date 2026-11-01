@@ -34,15 +34,34 @@ async function engine(args) {
 }
 
 // The agent to follow: the focused terminal when it is one, else the one
-// already followed, else the first agent in the shown tab. Clicking the dock
-// itself focuses a mod pane, which must not lose the agent behind it.
-function follow(previous) {
-  const list = agents(), f = focused();
+// already followed, else the first agent in the tab. Clicking the dock itself
+// focuses a mod pane, which must not lose the agent behind it.
+//
+// A dock passes its own tab as `home` and only ever follows agents there.
+// Every dock keeps ticking while its space is in the background, so following
+// the app-wide focus made a dock in one space pick up an agent focused in
+// another, and show that agent's turns when you came back to it. The frame
+// passes no home: it opens over whichever agent is focused.
+function follow(previous, home = null) {
+  const f = focused();
+  const list = home ? agents().filter((a) => a.tab === home) : agents();
   const here = list.find((a) => a.address === (f?.agent ?? f?.terminal));
   if (here) return here;
   const kept = previous && list.find((a) => a.address === previous);
   if (kept) return kept;
-  return list.find((a) => a.tab === f?.tab) ?? null;
+  return list.find((a) => a.tab === (home ?? f?.tab)) ?? null;
+}
+
+// The tab a dock lives in: its own pane's, when the app says which that is,
+// else the tab of the agent it was opened beside. Null leaves it following
+// focus anywhere, as before.
+function homeTab(given) {
+  const own = given?.pane ? panes().find((p) => p.pane === given.pane) : null;
+  if (own) return own.tab;
+  if (!given?.terminal) return null;
+  return agents().find((a) => a.address === given.terminal)?.tab
+    ?? panes().find((p) => p.terminal === given.terminal)?.tab
+    ?? null;
 }
 
 function toast(reply, ok) {
@@ -68,6 +87,7 @@ export default class Fleece extends View {
       this.load(cx);
       return;
     }
+    this.home = homeTab(props());
     // Agent status and focus are live data, so this only compares strings;
     // the engine runs when the followed agent or its status actually changes.
     this.tick(cx);
@@ -87,7 +107,7 @@ export default class Fleece extends View {
   }
 
   tick(cx) {
-    const agent = follow(this.address);
+    const agent = follow(this.address, this.home);
     const signature = agent ? `${agent.address}|${agent.status}` : "";
     if (signature === this.signature) return;
     if (agent?.address !== this.address) this.pin = null;
