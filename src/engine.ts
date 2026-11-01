@@ -7,8 +7,7 @@ import { launch, openArgs } from "./export/opener.js";
 import { extractItems } from "./extract.js";
 import { journalSummary, journalTurns } from "./journal.js";
 import { pickKeys } from "./keys.js";
-import { claudeProjectsDir } from "./resolve.js";
-import { readTurns } from "./transcript/claude.js";
+import { missingTranscript, readTargetTurns, supportedAgents } from "./transcript/agents.js";
 import type { Target, Turn } from "./transcript/types.js";
 import { answers, windowLabel, windowOf } from "./window.js";
 
@@ -139,10 +138,8 @@ async function open(flags: Flags, config: FleeceConfig): Promise<Reply> {
 
 /** What Fleece resolves for a terminal, without failing on a missing piece. */
 async function doctor(flags: Flags, config: FleeceConfig): Promise<Reply> {
-  const lines: [string, string][] = [
-    ["export dir", config.exportDir],
-    ["claude projects", claudeProjectsDir()],
-  ];
+  const lines: [string, string][] = [["export dir", config.exportDir]];
+  for (const agent of supportedAgents()) lines.push([`${agent.id} home`, agent.home()]);
   for (const problem of config.keyProblems) lines.push(["keys", `IGNORED: ${problem}`]);
   try {
     const target = await resolveTerminal(requireTerminal(flags));
@@ -150,7 +147,7 @@ async function doctor(flags: Flags, config: FleeceConfig): Promise<Reply> {
     lines.push(["session", target.sessionId ?? "(none)"], ["cwd", target.cwd ?? "(unknown)"]);
     lines.push(["transcript", target.transcriptPath ?? "(not found)"]);
     if (target.transcriptPath) {
-      const turns = readTurns(target.transcriptPath);
+      const turns = readTargetTurns(target);
       lines.push(["turns", `${turns.length} (${answers(turns).length} with an answer)`]);
     }
   } catch (err) {
@@ -161,13 +158,8 @@ async function doctor(flags: Flags, config: FleeceConfig): Promise<Reply> {
 
 async function load(flags: Flags): Promise<{ target: Target; turns: Turn[] }> {
   const target = await resolveTerminal(requireTerminal(flags));
-  if (target.agent !== "claude") {
-    throw new EngineError(`agent "${target.agent}" is not supported yet — Fleece reads Claude Code`);
-  }
-  if (!target.transcriptPath) {
-    throw new EngineError(`no Claude transcript for ${target.paneId} under ${claudeProjectsDir()}`);
-  }
-  return { target, turns: readTurns(target.transcriptPath) };
+  if (!target.transcriptPath) throw new EngineError(missingTranscript(target));
+  return { target, turns: readTargetTurns(target) };
 }
 
 function requireTerminal(flags: Flags): string {

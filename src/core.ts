@@ -1,9 +1,9 @@
 import { execFile } from "node:child_process";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { claudeProjectsDir, findClaudeTranscript } from "./resolve.js";
+import { agentTranscripts, locateTranscript } from "./transcript/agents.js";
 import type { Target } from "./transcript/types.js";
 
 const run = promisify(execFile);
@@ -78,33 +78,6 @@ export function sessionIdForPid(
   }
 }
 
-/**
- * Without a session file, the newest transcript in the project directory is
- * the best guess. It is only a guess — two agents in one folder share it — so
- * it is used last.
- */
-export function newestTranscript(cwd: string): string | undefined {
-  const dir = join(claudeProjectsDir(), cwd.replace(/[/.]/g, "-"));
-  let best: { path: string; mtime: number } | undefined;
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return undefined;
-  }
-  for (const entry of entries) {
-    if (!entry.endsWith(".jsonl")) continue;
-    const path = join(dir, entry);
-    try {
-      const mtime = statSync(path).mtimeMs;
-      if (!best || mtime > best.mtime) best = { path, mtime };
-    } catch {
-      /* raced with a delete */
-    }
-  }
-  return best?.path;
-}
-
 export async function resolveTerminal(address: string): Promise<Target> {
   const terminal = await coreTerminal(address);
   const cwd = terminal.foreground?.cwd ?? terminal.cwd;
@@ -114,15 +87,15 @@ export async function resolveTerminal(address: string): Promise<Target> {
     cwd,
     title: terminal.title,
   };
-  if (target.agent !== "claude") return target;
+  const agent = agentTranscripts(target.agent);
+  if (!agent) return target;
 
   const pid = terminal.foreground?.pid;
-  target.sessionId = pid ? sessionIdForPid(pid) : undefined;
-  if (target.sessionId) {
-    target.transcriptPath = findClaudeTranscript(target.sessionId, cwd) ?? undefined;
-  }
+  if (target.agent === "claude" && pid) target.sessionId = sessionIdForPid(pid);
+  target.transcriptPath = locateTranscript(target);
+  // Without a session id the newest transcript for the folder is a guess, used last.
   if (!target.transcriptPath && cwd) {
-    target.transcriptPath = newestTranscript(cwd);
+    target.transcriptPath = agent.newest(cwd);
     const file = target.transcriptPath?.split("/").pop();
     if (file) target.sessionId ??= file.replace(/\.jsonl$/, "");
   }

@@ -18,11 +18,10 @@ import {
 } from "./herdr.js";
 import { journalSummary, journalTurns } from "./journal.js";
 import { keyMap, PANEL_CHROME_ROWS, renderPanel } from "./render/panel.js";
-import { findClaudeTranscript } from "./resolve.js";
 import { CLEAR, enterScreen, KEY, leaveScreen, onKeys, onResize, terminalSize } from "./screen.js";
 import { subscribe, type EventStream, type HerdrEvent, type StreamState } from "./socket.js";
 import { StatusLine } from "./status.js";
-import { TranscriptWatch } from "./transcript/claude.js";
+import { AgentTranscriptWatch, locateTranscript } from "./transcript/agents.js";
 import type { Target, Turn } from "./transcript/types.js";
 import { stepPin, windowLabel, windowOf } from "./window.js";
 
@@ -50,7 +49,7 @@ const config = loadConfig();
 const selfPaneId = process.env.HERDR_PANE_ID ?? "";
 
 let target: Target | null = null;
-const transcript = new TranscriptWatch();
+const transcript = new AgentTranscriptWatch();
 let turns: Turn[] = [];
 let items: Item[] = [];
 let transcriptStamp = "";
@@ -180,11 +179,8 @@ async function retarget(paneId: string, force = false): Promise<void> {
     sessionId,
     cwd,
     title: pane.terminal_title_stripped,
-    transcriptPath:
-      pane.agent === "claude" && sessionId
-        ? (findClaudeTranscript(sessionId, cwd) ?? undefined)
-        : undefined,
   };
+  target.transcriptPath = locateTranscript(target);
 
   transcriptStamp = "";
   transcript.reset();
@@ -215,7 +211,7 @@ function reload(force = false): boolean {
   transcriptStamp = stamp;
 
   try {
-    turns = transcript.read(target.transcriptPath, force);
+    turns = transcript.read(target.agent, target.transcriptPath, force);
   } catch {
     return false;
   }

@@ -1,7 +1,5 @@
-import { existsSync, readdirSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { agentGet, paneCurrent, paneGet, type PaneAgent } from "./herdr.js";
+import { locateTranscript } from "./transcript/agents.js";
 import type { Target } from "./transcript/types.js";
 
 export class ResolveError extends Error {}
@@ -69,10 +67,7 @@ function targetFrom(pane: PaneAgent): Target {
     title: pane.terminal_title_stripped,
   };
 
-  if (agent === "claude" && sessionId) {
-    target.transcriptPath = findClaudeTranscript(sessionId, cwd) ?? undefined;
-  }
-
+  target.transcriptPath = locateTranscript(target);
   return target;
 }
 
@@ -99,35 +94,3 @@ function contextPaneId(): string | undefined {
   return envPane && envPane !== "" ? envPane : undefined;
 }
 
-export function claudeProjectsDir(): string {
-  const base = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
-  return join(base, "projects");
-}
-
-/**
- * Claude Code names a project directory after its cwd with separators replaced.
- * That mapping is an implementation detail, so a miss falls back to scanning
- * for the session id, which is unique across projects.
- */
-export function findClaudeTranscript(sessionId: string, cwd?: string): string | null {
-  const projects = claudeProjectsDir();
-  const file = `${sessionId}.jsonl`;
-
-  if (cwd) {
-    const direct = join(projects, cwd.replace(/[/.]/g, "-"), file);
-    if (existsSync(direct)) return direct;
-  }
-
-  let entries: string[];
-  try {
-    entries = readdirSync(projects);
-  } catch {
-    return null;
-  }
-
-  for (const entry of entries) {
-    const candidate = join(projects, entry, file);
-    if (existsSync(candidate)) return candidate;
-  }
-  return null;
-}

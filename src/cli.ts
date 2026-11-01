@@ -16,8 +16,8 @@ import {
 import { journalTurns } from "./journal.js";
 import { COMMANDS } from "./keys.js";
 import { renderFrame } from "./render/frame.js";
-import { claudeProjectsDir, resolveTarget } from "./resolve.js";
-import { readTurns } from "./transcript/claude.js";
+import { resolveTarget } from "./resolve.js";
+import { missingTranscript, readTargetTurns, supportedAgents } from "./transcript/agents.js";
 import type { Target, Turn } from "./transcript/types.js";
 
 class FleeceError extends Error {}
@@ -172,9 +172,9 @@ async function save(flags: Flags): Promise<void> {
 async function journal(flags: Flags): Promise<void> {
   const config = loadConfig();
   const target = await resolveTarget(flags.pane);
-  if (!target.transcriptPath) throw new FleeceError("no transcript for that pane");
+  if (!target.transcriptPath) throw new FleeceError(missingTranscript(target));
 
-  const result = journalTurns(readTurns(target.transcriptPath), target, config);
+  const result = journalTurns(readTargetTurns(target), target, config);
   const summary =
     `${result.written.length} written · ${result.skipped} already there` +
     (result.failed > 0 ? ` · ${result.failed} failed` : "");
@@ -191,7 +191,9 @@ async function doctor(flags: Flags): Promise<void> {
   lines.push(`herdr binary     ${process.env.HERDR_BIN_PATH ?? "herdr (from PATH)"}`);
   lines.push(`plugin config    ${configPath() ?? "(not running as a plugin)"}`);
   lines.push(`export dir       ${config.exportDir}`);
-  lines.push(`claude projects  ${claudeProjectsDir()}`);
+  for (const agent of supportedAgents()) {
+    lines.push(`${`${agent.id} home`.padEnd(17)}${agent.home()}`);
+  }
   lines.push(`dock keys        ${bindings(config)}`);
   lines.push(
     `open with        ${config.openCommand?.join(" ") ?? systemOpener() ?? "(no system opener)"}`,
@@ -207,7 +209,7 @@ async function doctor(flags: Flags): Promise<void> {
     lines.push(`transcript       ${target.transcriptPath ?? "(not found)"}`);
 
     if (target.transcriptPath) {
-      const turns = readTurns(target.transcriptPath);
+      const turns = readTargetTurns(target);
       const answered = turns.filter((entry) => entry.text !== "");
       lines.push(`turns            ${turns.length} (${answered.length} with an answer)`);
       const latest = answered.at(-1);
@@ -231,14 +233,10 @@ async function load(
   const target = await resolveTarget(flags.pane);
 
   if (!target.transcriptPath) {
-    throw new FleeceError(
-      target.agent === "claude"
-        ? `no Claude transcript for session ${target.sessionId ?? "?"} under ${claudeProjectsDir()}`
-        : `agent "${target.agent}" is not supported yet — Fleece 0.1.0 reads Claude Code only`,
-    );
+    throw new FleeceError(missingTranscript(target));
   }
 
-  const turns = readTurns(target.transcriptPath);
+  const turns = readTargetTurns(target);
   return { turn: pickTurn(turns, flags.turn), target, config };
 }
 

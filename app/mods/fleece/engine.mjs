@@ -224,41 +224,269 @@ function int(table, key) {
 }
 
 // src/core.ts
-import { execFile as execFile2 } from "node:child_process";
-import { readdirSync as readdirSync2, readFileSync as readFileSync2, statSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { readFileSync as readFileSync2 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
 import { join as join3 } from "node:path";
-import { promisify as promisify2 } from "node:util";
-
-// src/resolve.ts
-import { existsSync, readdirSync } from "node:fs";
-import { homedir as homedir2 } from "node:os";
-import { join as join2 } from "node:path";
-
-// src/herdr.ts
-import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-// src/render/text.ts
-var ESC = String.fromCharCode(27);
-var RESET = `${ESC}[0m`;
-var COLOR = process.env.NO_COLOR === void 0;
+// src/transcript/reader.ts
+import { closeSync, openSync, readSync, statSync } from "node:fs";
+var PREFIX_BYTES = 32;
+function emptyCursor(parser) {
+  return {
+    offset: 0,
+    pending: Buffer.alloc(0),
+    parser,
+    ino: 0,
+    dev: 0,
+    mtimeMs: 0,
+    prefix: Buffer.alloc(0)
+  };
+}
+function readTurnsGrowing(path, createParser, previous) {
+  const info = statSync(path);
+  const cursor = previous && canContinue(previous, info, path) ? previous : emptyCursor(createParser());
+  if (cursor.offset === info.size && cursor.pending.length === 0) {
+    return { turns: cursor.parser.snapshot(), cursor };
+  }
+  const fd = openSync(path, "r");
+  try {
+    const length = info.size - cursor.offset;
+    if (length > 0) {
+      const chunk = Buffer.alloc(length);
+      let read = 0;
+      while (read < length) {
+        const n = readSync(fd, chunk, read, length - read, cursor.offset + read);
+        if (n === 0) break;
+        read += n;
+      }
+      ingestBytes(cursor, chunk.subarray(0, read));
+      cursor.offset += read;
+    }
+    flushPending(cursor);
+    rememberFile(cursor, info, fd);
+  } finally {
+    closeSync(fd);
+  }
+  return { turns: cursor.parser.snapshot(), cursor };
+}
+function canContinue(previous, info, path) {
+  if (previous.offset === 0) return true;
+  if (info.size < previous.offset) return false;
+  if (previous.ino !== 0 && (info.ino !== previous.ino || info.dev !== previous.dev)) return false;
+  if (info.size === previous.offset && info.mtimeMs !== previous.mtimeMs) return false;
+  if (previous.prefix.length === 0) return true;
+  const fd = openSync(path, "r");
+  try {
+    const buf = Buffer.alloc(previous.prefix.length);
+    const n = readSync(fd, buf, 0, buf.length, 0);
+    return n === previous.prefix.length && buf.equals(previous.prefix);
+  } finally {
+    closeSync(fd);
+  }
+}
+function rememberFile(cursor, info, fd) {
+  cursor.ino = info.ino;
+  cursor.dev = info.dev;
+  cursor.mtimeMs = info.mtimeMs;
+  if (cursor.prefix.length > 0 || info.size === 0) return;
+  const n = Math.min(PREFIX_BYTES, info.size);
+  const buf = Buffer.alloc(n);
+  if (readSync(fd, buf, 0, n, 0) === n) cursor.prefix = buf;
+}
+function flushPending(cursor) {
+  if (cursor.pending.length === 0) return;
+  const line = cursor.pending.toString("utf8");
+  if (line.trim() === "") {
+    cursor.pending = Buffer.alloc(0);
+    return;
+  }
+  const record = parseLine(line);
+  if (record === void 0) return;
+  cursor.parser.ingest(record);
+  cursor.pending = Buffer.alloc(0);
+}
+function ingestBytes(cursor, chunk) {
+  const data = cursor.pending.length === 0 ? chunk : Buffer.concat([cursor.pending, chunk]);
+  let start = 0;
+  for (let i = 0; i < data.length; i++) {
+    if (data[i] !== 10) continue;
+    const record = parseLine(data.subarray(start, i).toString("utf8"));
+    if (record !== void 0) cursor.parser.ingest(record);
+    start = i + 1;
+  }
+  cursor.pending = start === 0 ? data : Buffer.from(data.subarray(start));
+}
+function parseLine(line) {
+  if (line.trim() === "") return void 0;
+  try {
+    return JSON.parse(line);
+  } catch {
+    return void 0;
+  }
+}
 
-// src/herdr.ts
-var run = promisify(execFile);
-var HERDR_BIN = process.env.HERDR_BIN_PATH ?? "herdr";
-var ESC2 = String.fromCharCode(27);
+// src/transcript/claude.ts
+var WRITE_TOOLS = {
+  Write: "file_path",
+  Edit: "file_path",
+  MultiEdit: "file_path",
+  NotebookEdit: "notebook_path"
+};
+var WRAPPER_TAGS = [
+  "system-reminder",
+  "local-command-caveat",
+  "local-command-stdout",
+  "command-message",
+  "command-args"
+];
+var ClaudeParser = class {
+  #closed = [];
+  #current = null;
+  ingest(value) {
+    if (typeof value !== "object" || value === null) return;
+    const record = value;
+    if (record.isSidechain === true) return;
+    if (record.type === "user" && isPrompt(record)) {
+      if (this.#current) this.#closed.push(finish(this.#current));
+      this.#current = startTurn(this.#closed.length + 1, record);
+      return;
+    }
+    if (record.type === "assistant" && this.#current) {
+      accumulate(this.#current, record);
+    }
+  }
+  snapshot() {
+    if (!this.#current) return this.#closed.slice();
+    return [...this.#closed, finish(cloneTurn(this.#current))];
+  }
+};
+var claudeParser = () => new ClaudeParser();
+function cloneTurn(turn) {
+  return {
+    ...turn,
+    toolUses: turn.toolUses.map((use) => ({ ...use })),
+    files: turn.files.map((file) => ({ ...file })),
+    usage: { ...turn.usage }
+  };
+}
+function isPrompt(record) {
+  if (record.isMeta === true) return false;
+  const content = record.message?.content;
+  if (typeof content === "string") return cleanPrompt(content) !== "";
+  if (!Array.isArray(content)) return false;
+  const blocks = content;
+  if (blocks.some((block) => block?.type === "tool_result")) return false;
+  return cleanPrompt(textOf(blocks)) !== "";
+}
+function startTurn(index, record) {
+  const content = record.message?.content;
+  const raw = typeof content === "string" ? content : textOf(content);
+  return {
+    index,
+    prompt: cleanPrompt(raw),
+    promptAt: record.timestamp,
+    text: "",
+    thinking: "",
+    toolUses: [],
+    files: [],
+    usage: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    gitBranch: record.gitBranch,
+    cwd: record.cwd,
+    agentVersion: record.version
+  };
+}
+function accumulate(turn, record) {
+  const content = record.message?.content;
+  const blocks = Array.isArray(content) ? content : typeof content === "string" ? [{ type: "text", text: content }] : [];
+  for (const block of blocks) {
+    if (!block) continue;
+    if (block.type === "text" && block.text) {
+      turn.text = turn.text === "" ? block.text : `${turn.text}
 
-// src/resolve.ts
+${block.text}`;
+    } else if (block.type === "thinking" && block.thinking) {
+      turn.thinking = turn.thinking === "" ? block.thinking : `${turn.thinking}
+
+${block.thinking}`;
+    } else if (block.type === "tool_use") {
+      const name = block.name ?? "tool";
+      addToolUse(turn.toolUses, name);
+      addFileEdit(turn.files, name, block.input);
+    }
+  }
+  if (record.message?.model) turn.model = record.message.model;
+  if (record.timestamp) turn.endedAt = record.timestamp;
+  if (record.gitBranch) turn.gitBranch = record.gitBranch;
+  addUsage(turn.usage, record.message?.usage);
+}
+function finish(turn) {
+  turn.text = turn.text.trim();
+  turn.thinking = turn.thinking.trim();
+  turn.files.sort((left, right) => right.edits - left.edits);
+  if (turn.promptAt && turn.endedAt) {
+    const ms = Date.parse(turn.endedAt) - Date.parse(turn.promptAt);
+    if (Number.isFinite(ms) && ms >= 0) turn.durationMs = ms;
+  }
+  return turn;
+}
+function addToolUse(uses, name) {
+  const existing = uses.find((use) => use.name === name);
+  if (existing) existing.count += 1;
+  else uses.push({ name, count: 1 });
+}
+function addFileEdit(files, name, input) {
+  const field = WRITE_TOOLS[name];
+  if (field === void 0 || typeof input !== "object" || input === null) return;
+  const path = input[field];
+  if (typeof path !== "string" || path.trim() === "") return;
+  const existing = files.find((file) => file.path === path);
+  if (existing) existing.edits += 1;
+  else files.push({ path, edits: 1 });
+}
+function addUsage(usage, raw) {
+  if (!raw) return;
+  usage.input += num(raw["input_tokens"]);
+  usage.output += num(raw["output_tokens"]);
+  usage.cacheRead += num(raw["cache_read_input_tokens"]);
+  usage.cacheCreation += num(raw["cache_creation_input_tokens"]);
+}
+function num(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+function textOf(blocks) {
+  if (!Array.isArray(blocks)) return "";
+  return blocks.filter((block) => block?.type === "text" && block.text).map((block) => block.text).join("\n\n");
+}
+function cleanPrompt(raw) {
+  let text = raw;
+  for (const tag of WRAPPER_TAGS) {
+    text = text.replace(new RegExp(`<${tag}>[\\s\\S]*?</${tag}>`, "g"), "");
+  }
+  text = text.replace(/<command-name>([\s\S]*?)<\/command-name>/g, (_m, name) => {
+    const trimmed = name.trim();
+    return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+  });
+  return text.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+// src/transcript/claude-files.ts
+import { existsSync, readdirSync, statSync as statSync2 } from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import { join as join2 } from "node:path";
 function claudeProjectsDir() {
   const base = process.env.CLAUDE_CONFIG_DIR ?? join2(homedir2(), ".claude");
   return join2(base, "projects");
+}
+function projectDir(cwd) {
+  return join2(claudeProjectsDir(), cwd.replace(/[/.]/g, "-"));
 }
 function findClaudeTranscript(sessionId, cwd) {
   const projects = claudeProjectsDir();
   const file = `${sessionId}.jsonl`;
   if (cwd) {
-    const direct = join2(projects, cwd.replace(/[/.]/g, "-"), file);
+    const direct = join2(projectDir(cwd), file);
     if (existsSync(direct)) return direct;
   }
   let entries;
@@ -273,16 +501,73 @@ function findClaudeTranscript(sessionId, cwd) {
   }
   return null;
 }
+function newestClaudeTranscript(cwd) {
+  const dir = projectDir(cwd);
+  let best;
+  let entries;
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return void 0;
+  }
+  for (const entry of entries) {
+    if (!entry.endsWith(".jsonl")) continue;
+    const path = join2(dir, entry);
+    try {
+      const mtime = statSync2(path).mtimeMs;
+      if (!best || mtime > best.mtime) best = { path, mtime };
+    } catch {
+    }
+  }
+  return best?.path;
+}
+
+// src/transcript/agents.ts
+var claude = {
+  id: "claude",
+  label: "Claude Code",
+  createParser: claudeParser,
+  home: claudeProjectsDir,
+  find: findClaudeTranscript,
+  newest: newestClaudeTranscript
+};
+var AGENTS = [claude];
+function agentTranscripts(agent) {
+  return AGENTS.find((entry) => entry.id === agent);
+}
+function supportedAgents() {
+  return AGENTS;
+}
+var TranscriptError = class extends Error {
+};
+function locateTranscript(target) {
+  const agent = agentTranscripts(target.agent);
+  if (!agent || !target.sessionId) return void 0;
+  return agent.find(target.sessionId, target.cwd) ?? void 0;
+}
+function missingTranscript(target) {
+  const agent = agentTranscripts(target.agent);
+  if (!agent) {
+    const names = AGENTS.map((entry) => entry.label).join(" and ");
+    return `agent "${target.agent}" is not supported yet \u2014 Fleece reads ${names}`;
+  }
+  return `no ${agent.label} transcript for session ${target.sessionId ?? "?"} under ${agent.home()}`;
+}
+function readTargetTurns(target) {
+  const agent = agentTranscripts(target.agent);
+  if (!agent || !target.transcriptPath) throw new TranscriptError(missingTranscript(target));
+  return readTurnsGrowing(target.transcriptPath, agent.createParser).turns;
+}
 
 // src/core.ts
-var run2 = promisify2(execFile2);
+var run = promisify(execFile);
 var CoreError = class extends Error {
 };
 var HC_BIN = process.env.FLEECE_HC ?? "hc";
 async function coreTerminal(address) {
   let stdout;
   try {
-    ({ stdout } = await run2(HC_BIN, ["get", address, "--json"], { maxBuffer: 4 * 1024 * 1024 }));
+    ({ stdout } = await run(HC_BIN, ["get", address, "--json"], { maxBuffer: 4 * 1024 * 1024 }));
   } catch (err) {
     const message2 = err instanceof Error ? err.message : String(err);
     throw new CoreError(`hc get ${address} failed: ${message2}`);
@@ -313,26 +598,6 @@ function sessionIdForPid(pid, read = (path) => readFileSync2(path, "utf8")) {
     return void 0;
   }
 }
-function newestTranscript(cwd) {
-  const dir = join3(claudeProjectsDir(), cwd.replace(/[/.]/g, "-"));
-  let best;
-  let entries;
-  try {
-    entries = readdirSync2(dir);
-  } catch {
-    return void 0;
-  }
-  for (const entry of entries) {
-    if (!entry.endsWith(".jsonl")) continue;
-    const path = join3(dir, entry);
-    try {
-      const mtime = statSync(path).mtimeMs;
-      if (!best || mtime > best.mtime) best = { path, mtime };
-    } catch {
-    }
-  }
-  return best?.path;
-}
 async function resolveTerminal(address) {
   const terminal = await coreTerminal(address);
   const cwd = terminal.foreground?.cwd ?? terminal.cwd;
@@ -342,14 +607,13 @@ async function resolveTerminal(address) {
     cwd,
     title: terminal.title
   };
-  if (target.agent !== "claude") return target;
+  const agent = agentTranscripts(target.agent);
+  if (!agent) return target;
   const pid = terminal.foreground?.pid;
-  target.sessionId = pid ? sessionIdForPid(pid) : void 0;
-  if (target.sessionId) {
-    target.transcriptPath = findClaudeTranscript(target.sessionId, cwd) ?? void 0;
-  }
+  if (target.agent === "claude" && pid) target.sessionId = sessionIdForPid(pid);
+  target.transcriptPath = locateTranscript(target);
   if (!target.transcriptPath && cwd) {
-    target.transcriptPath = newestTranscript(cwd);
+    target.transcriptPath = agent.newest(cwd);
     const file = target.transcriptPath?.split("/").pop();
     if (file) target.sessionId ??= file.replace(/\.jsonl$/, "");
   }
@@ -357,10 +621,10 @@ async function resolveTerminal(address) {
 }
 
 // src/export/clipboard.ts
-import { execFile as execFile3 } from "node:child_process";
-import { openSync, writeSync, closeSync } from "node:fs";
-import { promisify as promisify3 } from "node:util";
-var run3 = promisify3(execFile3);
+import { execFile as execFile2 } from "node:child_process";
+import { openSync as openSync2, writeSync, closeSync as closeSync2 } from "node:fs";
+import { promisify as promisify2 } from "node:util";
+var run2 = promisify2(execFile2);
 var TOOLS = {
   darwin: [["pbcopy"]],
   linux: [
@@ -379,7 +643,7 @@ async function copyWithTool(text) {
     const [bin, ...args] = command;
     if (!bin) continue;
     try {
-      const child = run3(bin, args);
+      const child = run2(bin, args);
       child.child.stdin?.end(text);
       await child;
       return bin;
@@ -392,7 +656,7 @@ function writeOsc52(text) {
   const payload = `\x1B]52;c;${Buffer.from(text, "utf8").toString("base64")}\x07`;
   let fd;
   try {
-    fd = openSync("/dev/tty", "w");
+    fd = openSync2("/dev/tty", "w");
   } catch {
     if (process.stdout.isTTY) {
       process.stdout.write(payload);
@@ -406,7 +670,7 @@ function writeOsc52(text) {
   } catch {
     return false;
   } finally {
-    closeSync(fd);
+    closeSync2(fd);
   }
 }
 
@@ -533,6 +797,11 @@ function stamp(iso) {
 import { existsSync as existsSync2 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
 import { join as join5, resolve as resolve2 } from "node:path";
+
+// src/render/text.ts
+var ESC = String.fromCharCode(27);
+var RESET = `${ESC}[0m`;
+var COLOR = process.env.NO_COLOR === void 0;
 
 // src/render/markdown.ts
 function parseInline(text, base = {}) {
@@ -913,250 +1182,6 @@ function journalSummary(result) {
   return result.failed > 0 ? `${wrote} \xB7 ${result.failed} failed` : wrote;
 }
 
-// src/transcript/reader.ts
-import { closeSync as closeSync2, openSync as openSync2, readSync, statSync as statSync2 } from "node:fs";
-var PREFIX_BYTES = 32;
-function emptyCursor(parser) {
-  return {
-    offset: 0,
-    pending: Buffer.alloc(0),
-    parser,
-    ino: 0,
-    dev: 0,
-    mtimeMs: 0,
-    prefix: Buffer.alloc(0)
-  };
-}
-function readTurnsGrowing(path, createParser, previous) {
-  const info = statSync2(path);
-  const cursor = previous && canContinue(previous, info, path) ? previous : emptyCursor(createParser());
-  if (cursor.offset === info.size && cursor.pending.length === 0) {
-    return { turns: cursor.parser.snapshot(), cursor };
-  }
-  const fd = openSync2(path, "r");
-  try {
-    const length = info.size - cursor.offset;
-    if (length > 0) {
-      const chunk = Buffer.alloc(length);
-      let read = 0;
-      while (read < length) {
-        const n = readSync(fd, chunk, read, length - read, cursor.offset + read);
-        if (n === 0) break;
-        read += n;
-      }
-      ingestBytes(cursor, chunk.subarray(0, read));
-      cursor.offset += read;
-    }
-    flushPending(cursor);
-    rememberFile(cursor, info, fd);
-  } finally {
-    closeSync2(fd);
-  }
-  return { turns: cursor.parser.snapshot(), cursor };
-}
-function canContinue(previous, info, path) {
-  if (previous.offset === 0) return true;
-  if (info.size < previous.offset) return false;
-  if (previous.ino !== 0 && (info.ino !== previous.ino || info.dev !== previous.dev)) return false;
-  if (info.size === previous.offset && info.mtimeMs !== previous.mtimeMs) return false;
-  if (previous.prefix.length === 0) return true;
-  const fd = openSync2(path, "r");
-  try {
-    const buf = Buffer.alloc(previous.prefix.length);
-    const n = readSync(fd, buf, 0, buf.length, 0);
-    return n === previous.prefix.length && buf.equals(previous.prefix);
-  } finally {
-    closeSync2(fd);
-  }
-}
-function rememberFile(cursor, info, fd) {
-  cursor.ino = info.ino;
-  cursor.dev = info.dev;
-  cursor.mtimeMs = info.mtimeMs;
-  if (cursor.prefix.length > 0 || info.size === 0) return;
-  const n = Math.min(PREFIX_BYTES, info.size);
-  const buf = Buffer.alloc(n);
-  if (readSync(fd, buf, 0, n, 0) === n) cursor.prefix = buf;
-}
-function flushPending(cursor) {
-  if (cursor.pending.length === 0) return;
-  const line = cursor.pending.toString("utf8");
-  if (line.trim() === "") {
-    cursor.pending = Buffer.alloc(0);
-    return;
-  }
-  const record = parseLine(line);
-  if (record === void 0) return;
-  cursor.parser.ingest(record);
-  cursor.pending = Buffer.alloc(0);
-}
-function ingestBytes(cursor, chunk) {
-  const data = cursor.pending.length === 0 ? chunk : Buffer.concat([cursor.pending, chunk]);
-  let start = 0;
-  for (let i = 0; i < data.length; i++) {
-    if (data[i] !== 10) continue;
-    const record = parseLine(data.subarray(start, i).toString("utf8"));
-    if (record !== void 0) cursor.parser.ingest(record);
-    start = i + 1;
-  }
-  cursor.pending = start === 0 ? data : Buffer.from(data.subarray(start));
-}
-function parseLine(line) {
-  if (line.trim() === "") return void 0;
-  try {
-    return JSON.parse(line);
-  } catch {
-    return void 0;
-  }
-}
-
-// src/transcript/claude.ts
-var WRITE_TOOLS = {
-  Write: "file_path",
-  Edit: "file_path",
-  MultiEdit: "file_path",
-  NotebookEdit: "notebook_path"
-};
-var WRAPPER_TAGS = [
-  "system-reminder",
-  "local-command-caveat",
-  "local-command-stdout",
-  "command-message",
-  "command-args"
-];
-var ClaudeParser = class {
-  #closed = [];
-  #current = null;
-  ingest(value) {
-    if (typeof value !== "object" || value === null) return;
-    const record = value;
-    if (record.isSidechain === true) return;
-    if (record.type === "user" && isPrompt(record)) {
-      if (this.#current) this.#closed.push(finish(this.#current));
-      this.#current = startTurn(this.#closed.length + 1, record);
-      return;
-    }
-    if (record.type === "assistant" && this.#current) {
-      accumulate(this.#current, record);
-    }
-  }
-  snapshot() {
-    if (!this.#current) return this.#closed.slice();
-    return [...this.#closed, finish(cloneTurn(this.#current))];
-  }
-};
-var claudeParser = () => new ClaudeParser();
-function readTurns(path) {
-  return readTurnsGrowing(path, claudeParser).turns;
-}
-function cloneTurn(turn) {
-  return {
-    ...turn,
-    toolUses: turn.toolUses.map((use) => ({ ...use })),
-    files: turn.files.map((file) => ({ ...file })),
-    usage: { ...turn.usage }
-  };
-}
-function isPrompt(record) {
-  if (record.isMeta === true) return false;
-  const content = record.message?.content;
-  if (typeof content === "string") return cleanPrompt(content) !== "";
-  if (!Array.isArray(content)) return false;
-  const blocks = content;
-  if (blocks.some((block) => block?.type === "tool_result")) return false;
-  return cleanPrompt(textOf(blocks)) !== "";
-}
-function startTurn(index, record) {
-  const content = record.message?.content;
-  const raw = typeof content === "string" ? content : textOf(content);
-  return {
-    index,
-    prompt: cleanPrompt(raw),
-    promptAt: record.timestamp,
-    text: "",
-    thinking: "",
-    toolUses: [],
-    files: [],
-    usage: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
-    gitBranch: record.gitBranch,
-    cwd: record.cwd,
-    agentVersion: record.version
-  };
-}
-function accumulate(turn, record) {
-  const content = record.message?.content;
-  const blocks = Array.isArray(content) ? content : typeof content === "string" ? [{ type: "text", text: content }] : [];
-  for (const block of blocks) {
-    if (!block) continue;
-    if (block.type === "text" && block.text) {
-      turn.text = turn.text === "" ? block.text : `${turn.text}
-
-${block.text}`;
-    } else if (block.type === "thinking" && block.thinking) {
-      turn.thinking = turn.thinking === "" ? block.thinking : `${turn.thinking}
-
-${block.thinking}`;
-    } else if (block.type === "tool_use") {
-      const name = block.name ?? "tool";
-      addToolUse(turn.toolUses, name);
-      addFileEdit(turn.files, name, block.input);
-    }
-  }
-  if (record.message?.model) turn.model = record.message.model;
-  if (record.timestamp) turn.endedAt = record.timestamp;
-  if (record.gitBranch) turn.gitBranch = record.gitBranch;
-  addUsage(turn.usage, record.message?.usage);
-}
-function finish(turn) {
-  turn.text = turn.text.trim();
-  turn.thinking = turn.thinking.trim();
-  turn.files.sort((left, right) => right.edits - left.edits);
-  if (turn.promptAt && turn.endedAt) {
-    const ms = Date.parse(turn.endedAt) - Date.parse(turn.promptAt);
-    if (Number.isFinite(ms) && ms >= 0) turn.durationMs = ms;
-  }
-  return turn;
-}
-function addToolUse(uses, name) {
-  const existing = uses.find((use) => use.name === name);
-  if (existing) existing.count += 1;
-  else uses.push({ name, count: 1 });
-}
-function addFileEdit(files, name, input) {
-  const field = WRITE_TOOLS[name];
-  if (field === void 0 || typeof input !== "object" || input === null) return;
-  const path = input[field];
-  if (typeof path !== "string" || path.trim() === "") return;
-  const existing = files.find((file) => file.path === path);
-  if (existing) existing.edits += 1;
-  else files.push({ path, edits: 1 });
-}
-function addUsage(usage, raw) {
-  if (!raw) return;
-  usage.input += num(raw["input_tokens"]);
-  usage.output += num(raw["output_tokens"]);
-  usage.cacheRead += num(raw["cache_read_input_tokens"]);
-  usage.cacheCreation += num(raw["cache_creation_input_tokens"]);
-}
-function num(value) {
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
-}
-function textOf(blocks) {
-  if (!Array.isArray(blocks)) return "";
-  return blocks.filter((block) => block?.type === "text" && block.text).map((block) => block.text).join("\n\n");
-}
-function cleanPrompt(raw) {
-  let text = raw;
-  for (const tag of WRAPPER_TAGS) {
-    text = text.replace(new RegExp(`<${tag}>[\\s\\S]*?</${tag}>`, "g"), "");
-  }
-  text = text.replace(/<command-name>([\s\S]*?)<\/command-name>/g, (_m, name) => {
-    const trimmed = name.trim();
-    return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
-  });
-  return text.replace(/\n{3,}/g, "\n\n").trim();
-}
-
 // src/window.ts
 function answers(turns) {
   return turns.filter((turn) => turn.text !== "");
@@ -1261,10 +1286,8 @@ async function open(flags, config) {
   return { ok: true, message: `opened ${flags.target}` };
 }
 async function doctor(flags, config) {
-  const lines = [
-    ["export dir", config.exportDir],
-    ["claude projects", claudeProjectsDir()]
-  ];
+  const lines = [["export dir", config.exportDir]];
+  for (const agent of supportedAgents()) lines.push([`${agent.id} home`, agent.home()]);
   for (const problem of config.keyProblems) lines.push(["keys", `IGNORED: ${problem}`]);
   try {
     const target = await resolveTerminal(requireTerminal(flags));
@@ -1272,7 +1295,7 @@ async function doctor(flags, config) {
     lines.push(["session", target.sessionId ?? "(none)"], ["cwd", target.cwd ?? "(unknown)"]);
     lines.push(["transcript", target.transcriptPath ?? "(not found)"]);
     if (target.transcriptPath) {
-      const turns = readTurns(target.transcriptPath);
+      const turns = readTargetTurns(target);
       lines.push(["turns", `${turns.length} (${answers(turns).length} with an answer)`]);
     }
   } catch (err) {
@@ -1282,13 +1305,8 @@ async function doctor(flags, config) {
 }
 async function load(flags) {
   const target = await resolveTerminal(requireTerminal(flags));
-  if (target.agent !== "claude") {
-    throw new EngineError(`agent "${target.agent}" is not supported yet \u2014 Fleece reads Claude Code`);
-  }
-  if (!target.transcriptPath) {
-    throw new EngineError(`no Claude transcript for ${target.paneId} under ${claudeProjectsDir()}`);
-  }
-  return { target, turns: readTurns(target.transcriptPath) };
+  if (!target.transcriptPath) throw new EngineError(missingTranscript(target));
+  return { target, turns: readTargetTurns(target) };
 }
 function requireTerminal(flags) {
   if (!flags.terminal) throw new EngineError("--terminal is required");
