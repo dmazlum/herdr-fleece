@@ -38,12 +38,18 @@ screen.
   agent is `working`, it holds the last good list. It reads again once the agent goes
   `idle`, `done` or `blocked`.
 - Keys while the dock has focus: an item key copies that item. `s` then an item key
-  sends it. `e` then an item key opens it. `y` copies the whole answer, `m` saves it,
-  `o` opens the frame, `[`/`]` page through answers, `r` reloads, and Esc cancels a
-  pending `s`/`e`. Keys come from `~/.config/fleece/config.toml` `[keys]`, the same table
+  sends it. `t` then an item key (or `y` for the whole answer) and a number relays it
+  to another agent. `e` then an item key opens it. `y` copies the whole answer, `m` saves
+  it, `o` opens the frame, `[`/`]` page through answers, `r` reloads, and Esc cancels a
+  pending `s`/`t`/`e`. Keys come from `~/.config/fleece/config.toml` `[keys]`, the same table
   the Herdr plugin uses.
 - **Send** copies the item, focuses the agent's terminal, and runs `terminal.paste`. It
   never presses Enter.
+- **Relay** does the same into another agent, picked by number from `agents()`, nearest
+  first (same tab, same space, the rest), at most nine. Focus moves to that agent, so the
+  dock follows it. Each row has a relay button too, and in the frame `t` (or the Relay
+  button) relays the whole answer; the frame closes first so the paste reaches the
+  terminal.
 - **Open** passes files and paths to `open`/`xdg-open`, or to `open_command`. Links
   always go to the browser.
 - Paging back pins the window to that answer, so a new turn doesn't move it. Stepping

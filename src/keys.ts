@@ -23,6 +23,7 @@ export const COMMANDS = [
   "bottom",
   "reload",
   "send",
+  "relay",
   "open",
   "older",
   "newer",
@@ -44,6 +45,7 @@ export const DEFAULT_KEYS: KeyBindings = {
   bottom: "G",
   reload: "r",
   send: "s",
+  relay: "t",
   open: "e",
   older: "[",
   newer: "]",
@@ -117,6 +119,7 @@ function segments(keys: KeyBindings): [Segment[], Segment[]] {
     [
       { text: "key copy", keep: 3 },
       { text: `${keys.send} send`, keep: 2 },
+      { text: `${keys.relay} relay`, keep: 1 },
       { text: `${keys.open} open`, keep: 2 },
     ],
     [
