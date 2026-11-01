@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { agentApp, isClaude, sessionIdForPid, type CoreTerminal } from "./core.js";
+import { agentApp, isClaude, sessionIdForPid, terminalState, type CoreTerminal } from "./core.js";
 
 const reported: CoreTerminal = {
   address: "t8",
@@ -40,4 +40,10 @@ test("a missing or malformed session file gives no session", () => {
   );
   assert.equal(sessionIdForPid(1, () => "{not json"), undefined);
   assert.equal(sessionIdForPid(1, () => JSON.stringify({ sessionId: "" })), undefined);
+});
+
+test("a terminal's state comes from its status object or string", () => {
+  assert.equal(terminalState(reported), "working");
+  assert.equal(terminalState({ address: "t6", status: "idle" }), "idle");
+  assert.equal(terminalState({ address: "t7" }), undefined);
 });

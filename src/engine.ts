@@ -5,7 +5,7 @@ import { codeOnly } from "./export/code.js";
 import { buildMarkdown, saveMarkdown } from "./export/markdown.js";
 import { launch, openArgs } from "./export/opener.js";
 import { extractItems } from "./extract.js";
-import { journalSummary, journalTurns } from "./journal.js";
+import { journalSummary, journalTurns, transcriptSettled } from "./journal.js";
 import { pickKeys } from "./keys.js";
 import { claudeProjectsDir } from "./resolve.js";
 import { readTurns } from "./transcript/claude.js";
@@ -87,7 +87,12 @@ async function state(flags: Flags, config: FleeceConfig): Promise<Reply> {
   // Journal on the dock's refresh rather than in a daemon: an answer that has
   // landed is written the next time anyone looks, and twice is a no-op.
   if (flags.journal && config.journal) {
-    reply.journal = journalSummary(journalTurns(turns, target, config)) ?? null;
+    const result = journalTurns(turns, target, config, { settled: transcriptSettled(target) });
+    reply.journal = journalSummary(result) ?? null;
+    // An idle agent whose transcript has not gone quiet yet: the mod asks again
+    // on its next tick. A working or blocked agent gets a status change instead.
+    reply.journalPending =
+      result.pending !== undefined && (target.status === "idle" || target.status === "done");
   }
   return reply;
 }
@@ -122,10 +127,11 @@ async function save(flags: Flags, config: FleeceConfig): Promise<Reply> {
 
 async function journal(flags: Flags, config: FleeceConfig): Promise<Reply> {
   const { target, turns } = await load(flags);
-  const result = journalTurns(turns, target, config);
+  const result = journalTurns(turns, target, config, { settled: transcriptSettled(target) });
   const message =
     `${result.written.length} written · ${result.skipped} already there` +
-    (result.failed > 0 ? ` · ${result.failed} failed` : "");
+    (result.failed > 0 ? ` · ${result.failed} failed` : "") +
+    (result.pending !== undefined ? ` · turn ${result.pending} still in progress` : "");
   return { ok: true, message, exportDir: config.exportDir };
 }
 

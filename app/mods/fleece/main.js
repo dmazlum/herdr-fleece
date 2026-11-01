@@ -114,6 +114,8 @@ export default class Fleece extends View {
       this.data = reply.ok ? reply : null;
       this.error = reply.ok ? null : reply.error;
       if (reply.journal) notify({ title: "Fleece", body: reply.journal, timeout: 2500 });
+      // The latest answer had not settled; forget the signature so the next tick loads again.
+      if (reply.journalPending) this.signature = null;
       cx.notify();
     });
   }

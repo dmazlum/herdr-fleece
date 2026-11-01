@@ -43,6 +43,11 @@ export async function coreTerminal(address: string): Promise<CoreTerminal> {
   }
 }
 
+/** The agent's state as the core reports it: `idle`, `working`, `done`… */
+export function terminalState(terminal: CoreTerminal): string | undefined {
+  return typeof terminal.status === "object" ? terminal.status?.state : terminal.status;
+}
+
 /** What the agent reported over OSC 7501, e.g. "claude-code". */
 export function agentApp(terminal: CoreTerminal): string | undefined {
   return typeof terminal.status === "object" ? terminal.status?.app : undefined;
@@ -110,6 +115,7 @@ export async function resolveTerminal(address: string): Promise<Target> {
   const cwd = terminal.foreground?.cwd ?? terminal.cwd;
   const target: Target = {
     paneId: terminal.address ?? address,
+    status: terminalState(terminal),
     agent: isClaude(terminal) ? "claude" : (agentApp(terminal) ?? "unknown"),
     cwd,
     title: terminal.title,
