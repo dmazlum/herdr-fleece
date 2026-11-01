@@ -17,6 +17,8 @@ export interface AgentSession {
 /** The subset of Herdr's pane/agent record that Fleece relies on. */
 export interface PaneAgent {
   agent?: string;
+  /** The name given with `herdr agent rename` or `agent start`, if any. */
+  name?: string;
   agent_session?: AgentSession;
   agent_status?: string;
   cwd?: string;
@@ -100,6 +102,16 @@ export async function agentGet(paneId: string): Promise<PaneAgent | null> {
     return (result?.agent as PaneAgent) ?? null;
   } catch {
     return null;
+  }
+}
+
+/** Every agent pane Herdr knows, in its own order. Empty when the call fails. */
+export async function agentList(): Promise<PaneAgent[]> {
+  try {
+    const result = await call(["agent", "list"]);
+    return Array.isArray(result?.agents) ? (result.agents as PaneAgent[]) : [];
+  } catch {
+    return [];
   }
 }
 

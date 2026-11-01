@@ -10,6 +10,7 @@ import { saveMarkdown } from "./export/markdown.js";
 import { extractItems, type Item } from "./extract.js";
 import {
   agentGet,
+  agentList,
   openFrameOverlay,
   paneCurrent,
   paneRect,
@@ -17,6 +18,7 @@ import {
   type PaneRect,
 } from "./herdr.js";
 import { journalSummary, journalTurns, QUIET_MS, transcriptSettled } from "./journal.js";
+import { relayPrompt, relayReceipt, relayTargets, targetForKey, type RelayTarget } from "./relay.js";
 import { keyMap, PANEL_CHROME_ROWS, renderPanel } from "./render/panel.js";
 import { CLEAR, enterScreen, KEY, leaveScreen, onKeys, onResize, terminalSize } from "./screen.js";
 import { subscribe, type EventStream, type HerdrEvent, type StreamState } from "./socket.js";
@@ -71,10 +73,12 @@ const statusLine = new StatusLine(() => draw());
  */
 let lastFocused = "";
 /**
- * Set between pressing `s` or `e` and choosing the item it should act on, so
- * the next key names an item rather than a command.
+ * Set between pressing `s`, `e` or `t` and choosing the item it should act
+ * on, so the next key names an item rather than a command. A relay then asks a
+ * second question, which agent, while `relaying` holds what it will paste.
  */
-let armed: "send" | "open" | null = null;
+let armed: "send" | "open" | "relay" | "relay-to" | null = null;
+let relaying: { text: string; what: string; targets: RelayTarget[] } | null = null;
 /**
  * The newest answered turn the panel is showing, by its own index, or null to
  * follow the session. Pinning by index rather than by a distance from the end
@@ -370,15 +374,23 @@ async function onKey(key: string): Promise<void> {
   statusLine.clear();
   let message: string | undefined;
 
-  // The send and open keys arm a pick, so the next key names an item, not a command.
+  // The send, open and relay keys arm a pick, so the next key names an item, not a command.
   if (armed !== null) {
     const action = armed;
     armed = null;
-    const item =
-      key === KEY.ESCAPE || key === KEY.CTRL_C ? undefined : keyMap(items, keys).get(key);
-    if (!item) message = `${action} cancelled`;
-    else message = action === "send" ? await send(item) : await open(item);
-    statusLine.show(message);
+    const cancel = key === KEY.ESCAPE || key === KEY.CTRL_C;
+    if (action === "relay-to") {
+      if (cancel) relaying = null;
+      message = cancel ? "relay cancelled" : await relayTo(key);
+    } else if (action === "relay") {
+      message = cancel ? "relay cancelled" : await relayPick(key);
+    } else {
+      const item = cancel ? undefined : keyMap(items, keys).get(key);
+      if (!item) message = `${action} cancelled`;
+      else message = action === "send" ? await send(item) : await open(item);
+    }
+    if (armed !== null) statusLine.hold(message);
+    else statusLine.show(message);
     draw();
     return;
   }
@@ -404,6 +416,8 @@ async function onKey(key: string): Promise<void> {
     journalNote = undefined;
   } else if (key === keys.send) {
     message = arm();
+  } else if (key === keys.relay) {
+    message = armRelay();
   } else if (key === keys.open) {
     message = armOpen();
   } else if (key === keys.older) {
@@ -512,6 +526,62 @@ async function send(item: Item): Promise<string> {
 
   const lines = item.text.trim().split("\n").length;
   return `sent ${item.kind} → ${where}${lines > 1 ? ` · ${lines} lines` : ""}`;
+}
+
+function armRelay(): string {
+  if (items.length === 0 && !latestAnswer()) return "nothing to relay";
+  armed = "relay";
+  return `relay · pick an item or ${config.keys["copy-answer"]} for the answer, esc cancels`;
+}
+
+/** The first relay question answered: what to carry. Asks which agent unless only one is left. */
+async function relayPick(key: string): Promise<string> {
+  let text: string;
+  let what: string;
+  if (key === config.keys["copy-answer"]) {
+    const latest = latestAnswer();
+    if (!latest) return "no answer yet";
+    text = latest.text;
+    what = "answer";
+  } else {
+    const item = keyMap(items, config.keys).get(key);
+    if (!item) return "relay cancelled";
+    text = item.text;
+    what = item.kind;
+  }
+
+  const agents = await agentList();
+  const from = agents.find((agent) => agent.pane_id === target?.paneId);
+  const targets = relayTargets(
+    agents,
+    { paneId: target?.paneId ?? "", tabId: from?.tab_id, workspaceId: from?.workspace_id },
+    selfPaneId,
+  );
+  if (targets.length === 0) return "no other agent to relay to";
+
+  relaying = { text, what, targets };
+  if (targets.length === 1) return relayTo("1");
+  armed = "relay-to";
+  return relayPrompt(what, targets);
+}
+
+/**
+ * The second question answered: which agent. Pasted like `s`, bracketed and
+ * without Enter, so the receiving agent waits for the reader to look first.
+ */
+async function relayTo(key: string): Promise<string> {
+  const pending = relaying;
+  relaying = null;
+  if (!pending) return "relay cancelled";
+  const where = targetForKey(pending.targets, key);
+  if (!where) return "relay cancelled";
+
+  try {
+    await paneSendText(where.paneId, pending.text);
+  } catch {
+    return `could not relay to ${where.label}`;
+  }
+  return relayReceipt(pending.what, where, pending.text);
 }
 
 /**

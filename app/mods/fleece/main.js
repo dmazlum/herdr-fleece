@@ -19,7 +19,21 @@ import {
 const ENGINE = () => `${appHome()}/mods/fleece/engine.mjs`;
 const FRAME = { kind: "dialog", width: 0.7, height: 0.85 };
 const SECTIONS = [["file", "FILES"], ["code", "CODE"], ["command", "COMMANDS"], ["path", "PATHS"], ["link", "LINKS"]];
-const DEFAULT_KEYS = { reload: "r", send: "s", open: "e", older: "[", newer: "]", frame: "o", "copy-answer": "y", save: "m", close: "q" };
+const DEFAULT_KEYS = { reload: "r", send: "s", relay: "t", open: "e", older: "[", newer: "]", frame: "o", "copy-answer": "y", save: "m", close: "q" };
+const AGENT_NAMES = { "claude-code": "claude" };
+
+// Other agents to relay to, nearest first: the same tab, the same space, the
+// rest. Number keys pick one, so there are at most nine.
+function relayTargets(from) {
+  const here = agents().find((a) => a.address === from);
+  const distance = (a) => (a.tab === here?.tab ? 0 : a.space === here?.space ? 1 : 2);
+  return agents()
+    .filter((a) => a.address !== from)
+    .map((a, order) => ({ a, order, d: distance(a) }))
+    .sort((x, y) => x.d - y.d || x.order - y.order)
+    .slice(0, 9)
+    .map(({ a }) => ({ address: a.address, label: `${AGENT_NAMES[a.app] ?? a.app ?? "agent"} ${a.tab_name || a.address}` }));
+}
 
 async function engine(args) {
   let r;
@@ -56,7 +70,8 @@ export default class Fleece extends View {
     this.handle = cx.focus_handle();
     this.data = null;
     this.error = null;
-    this.armed = null; // "send" | "open" while waiting for an item key
+    this.armed = null; // "send" | "open" | "relay" while waiting for an item key, "relay-to" for a target
+    this.relaying = null; // { text, what, targets } between the two relay keys
     this.pin = props()?.pin ?? null;
     this.address = props()?.terminal ?? null;
     this.signature = "";
@@ -156,6 +171,37 @@ export default class Fleece extends View {
     });
   }
 
+  // Relay, step one: what to carry, an item or the whole answer.
+  relayPick(key, cx) {
+    const k = this.keys();
+    const items = this.data?.items ?? [];
+    const item = items.find((i) => i.key === key);
+    const text = key === k["copy-answer"] ? this.data?.turn?.text : item?.text;
+    if (!text) return;
+    const what = key === k["copy-answer"] ? "answer" : item.kind;
+    const targets = relayTargets(this.address);
+    if (targets.length === 0) return notify({ title: "Fleece", body: "no other agent to relay to", level: "warning" });
+    this.relaying = { text, what, targets };
+    if (targets.length === 1) return this.relayTo("1", cx);
+    this.armed = "relay-to";
+  }
+
+  // Step two: which agent. Pasted like send, never submitted.
+  relayTo(key, cx) {
+    const pending = this.relaying;
+    this.relaying = null;
+    const target = /^[1-9]$/.test(key) ? pending?.targets[Number(key) - 1] : null;
+    if (!target) return;
+    cx.spawn(async (cx) => {
+      const reply = await engine(["clip", "--text", pending.text]);
+      if (!reply.ok) return toast(reply);
+      run("pane.focus", { terminal: target.address });
+      run("terminal.paste");
+      notify({ title: "Fleece", body: `relayed ${pending.what} → ${target.label}`, level: "success", timeout: 2500 });
+      cx.notify();
+    });
+  }
+
   openItem(item, cx) {
     if (!item.open) return notify({ title: "Fleece", body: `a ${item.kind} has nothing to open`, level: "warning" });
     this.act(["open", "--target", item.open, ...(item.kind === "link" ? ["--link"] : [])], cx);
@@ -178,7 +224,7 @@ export default class Fleece extends View {
     const k = this.keys(), key = e.key_char ?? e.key;
     if (e.modifiers?.control || e.modifiers?.platform || e.modifiers?.alt) return;
     if (e.key === "escape") {
-      if (this.armed) { this.armed = null; return cx.notify(); }
+      if (this.armed) { this.armed = null; this.relaying = null; return cx.notify(); }
       if (this.frame) closeOverlay(props().overlay);
       return;
     }
@@ -186,7 +232,9 @@ export default class Fleece extends View {
     if (this.armed) {
       const item = items.find((i) => i.key === key), mode = this.armed;
       this.armed = null;
-      if (item) mode === "send" ? this.sendItem(item, cx) : this.openItem(item, cx);
+      if (mode === "relay") this.relayPick(key, cx);
+      else if (mode === "relay-to") this.relayTo(key, cx);
+      else if (item) mode === "send" ? this.sendItem(item, cx) : this.openItem(item, cx);
       return cx.notify();
     }
     if (key === k["copy-answer"]) return this.act(["copy", ...this.turnArgs()], cx);
@@ -202,6 +250,7 @@ export default class Fleece extends View {
     }
     if (key === k.frame) return this.openFrame();
     if (key === k.send || key === k.open) { this.armed = key === k.send ? "send" : "open"; return cx.notify(); }
+    if (key === k.relay) { this.armed = "relay"; return cx.notify(); }
     const item = items.find((i) => i.key === key);
     if (item) this.copyItem(item, cx);
   }
@@ -249,9 +298,13 @@ export default class Fleece extends View {
         .child(div().px(12).text_size(10.5).font_medium().text_color(t.dim).child(title))
         .children(rows.map((item, n) => this.row(item, `${title}-${n}`, t, mono)))));
 
-    const hint = this.armed
-      ? `${this.armed} — press an item key · Esc cancels`
-      : `key copy · ${k.send} send · ${k.open} open · ${k["copy-answer"]} all · ${k.save} save · ${k.frame} frame · ${k.older}${k.newer} turn`;
+    const hint = this.armed === "relay-to"
+      ? `relay ${this.relaying?.what ?? ""} → ${(this.relaying?.targets ?? []).map((x, n) => `${n + 1} ${x.label}`).join(" · ")} · Esc cancels`
+      : this.armed === "relay"
+        ? `relay — press an item key or ${k["copy-answer"]} for the answer · Esc cancels`
+        : this.armed
+          ? `${this.armed} — press an item key · Esc cancels`
+          : `key copy · ${k.send} send · ${k.relay} relay · ${k.open} open · ${k["copy-answer"]} all · ${k.save} save · ${k.frame} frame · ${k.older}${k.newer} turn`;
 
     const footer = v_flex().flex_none().border_t_1().border_color(t.border).px(6).py(4).gap(2)
       .child(h_flex().gap(2).flex_wrap()

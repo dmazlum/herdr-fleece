@@ -14,8 +14,8 @@ Requires **Node 20+**, **Herdr 0.8.0+**, and a **Claude Code** or **Codex** sess
 - **Frame.** Overlay the last answer on demand. `q` closes it. Copy, copy-code, or save
   without taking space from the agent pane.
 - **Dock.** A narrow pane that lists files the agent edited, plus code, commands, paths,
-  and links from the last few turns. One keystroke copies; `s` then a key sends; `e` then
-  a key opens a file, path, or link.
+  and links from the last few turns. One keystroke copies; `s` then a key sends; `t` then
+  a key relays it to another agent; `e` then a key opens a file, path, or link.
 - **Journal.** Optionally write every answer to disk as Markdown as it lands.
 - **Clipboard.** Local tools (`pbcopy`, `wl-copy`, `xclip`, `xsel`) and OSC 52 over SSH.
 
@@ -42,7 +42,7 @@ Then merge [`app/keys.json`](app/keys.json) into `~/.config/herdr-app/keys.json`
 | `herdr-app do pane.split --direction right --mod fleece` | The same dock, from a shell |
 | `cmd-shift-y` → `fleece.copy` | Copy the last answer (with a dock shown) |
 
-In the dock, click a row to copy it. Its keys match the plugin's (item key, `s`, `e`, `y`,
+In the dock, click a row to copy it. Its keys match the plugin's (item key, `s`, `t`, `e`, `y`,
 `m`, `o`, `[`/`]`, `r`). The frame takes `y`, `c`, `m`, `d`, `[`/`]` and Esc. Configuration
 is read from `~/.config/fleece/config.toml` (or `$FLEECE_CONFIG_DIR`), with the same keys
 as below. Claude Code and Codex agents on this machine are supported. [`app/RECIPE.md`](app/RECIPE.md)
@@ -157,6 +157,7 @@ window. A new turn does not move a window you have paged away from.
 | --- | --- |
 | `1`–`9`, leftover letters | Copy that item |
 | `s` then an item key | Send to the pane you came from (Esc cancels) |
+| `t` then an item key or `y`, then a number | Relay the item, or the whole answer, to another agent |
 | `e` then an item key | Open a file, path, or link (Esc cancels) |
 | `y` | Copy the whole answer |
 | `m` | Save as Markdown |
@@ -172,6 +173,12 @@ commands have nothing to open.
 
 Send uses a bracketed paste and never presses Enter. Control bytes are stripped so a
 payload cannot break the paste wrap.
+
+Relay carries something from the followed agent to a different one, without the dock
+switching to that agent's list. `t` asks for an item key, or `y` for the whole answer,
+then lists the other agents nearest first (same tab, same workspace, the rest) and takes
+a number. With only one other agent it goes straight there. It pastes the same way as
+send, so the receiving agent waits until you press Enter.
 
 ## Commands
 
@@ -218,6 +225,7 @@ top         = "g"
 bottom      = "G"
 reload      = "r"
 send        = "s"
+relay       = "t"
 open        = "e"
 older       = "["
 newer       = "]"
