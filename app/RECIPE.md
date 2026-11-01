@@ -12,21 +12,24 @@ screen.
 
 - **Dock** (a mod pane, usually to the right of the agent). It uses the theme's `chrome`
   background and 12px UI text.
-  - A 30px header: **Fleece** (semibold), the window label in `dim` ("last 3 turns", or
-    "turn 12 · 2 back" when paged back), and `live` (`idle` color) or `pinned`
-    (`blocked` color) on the right.
+  - A 34px header: **Fleece** (semibold), the window label in `dim` ("last 3 turns", or
+    "turn 12 · 2 back" when paged back), and a status on the right: a dot and `live` in
+    the `done` color, the dot slowly breathing, or a still dot and `pinned` in `blocked`.
   - Sections in a fixed order: FILES, CODE, COMMANDS, PATHS, LINKS. Each title is 10.5px
-    `dim`. Rows are 24px. Each row shows its pick key (`1`–`9`, then letters not bound to
-    a command), an optional tag (the fence language), a truncated label (monospace for
-    code and commands), an optional detail (`×4` edits, `12 ln`), then `send` and, for
-    files, paths and links, `open` buttons.
-  - A footer with Copy all, Save and Frame buttons, `‹ ›` for turns, and a one-line key
-    hint. While `s` or `e` is waiting for an item key, the hint switches to the `accent`
-    color.
-- **Frame**: a dialog at 70%×85% of the window, on `popover`. The header shows **Fleece**,
-  `turn N · model`, and the first line of the prompt. The body is the answer, rendered
-  with `TextView.markdown` and selectable. The footer has `y Copy`, `c Copy code`,
-  `m Save`, `d Dock`, `[ Older`, `Newer ]` and `Esc`.
+    `dim`, followed by its row count. Rows are 26px with 6px corners; hovering one fills it
+    with `hover` and draws a 2px `accent` bar on its left. Each row shows its pick key
+    (`1`–`9`, then letters not bound to a command), an optional tag (the fence language,
+    as a small `accent` pill), a truncated label (monospace for code and commands), an
+    optional detail (`×4` edits, `12 ln`), then `send`, `relay` and, for files, paths and
+    links, `open` buttons.
+  - A footer with `y Copy all`, `m Save` and `o Frame` buttons (the key in `accent`),
+    `‹ ›` for turns, and a one-line key hint. While `s`, `t` or `e` is waiting for an item
+    key, the hint switches to the `accent` color.
+- **Frame**: a dialog at 70%×85% of the window, on `popover`. The header shows **Fleece**
+  (15px), `turn N · model`, and the first line of the prompt after an `accent` `›`. The
+  body is the answer, rendered with `TextView.markdown` and selectable. The footer has
+  `y Copy`, `c Copy code`, `t Relay`, `m Save`, `d Dock`, `[ Older`, `Newer ]` and `Esc`,
+  each key in `accent`.
 
 ## How it behaves
 
