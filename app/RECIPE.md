@@ -30,9 +30,10 @@ screen.
 
 ## How it behaves
 
-- The dock follows the focused agent terminal. When a mod pane (or anything that isn't an
-  agent) takes focus, it keeps the last agent. With nothing to follow, it uses the first
-  agent in the shown tab.
+- The dock follows the focused agent terminal in its own tab (the tab of the agent it was
+  opened beside). An agent focused in another tab or space is ignored, so a dock never
+  shows another space's agent. When a mod pane (or anything that isn't an agent) takes
+  focus, it keeps the last agent. With nothing to follow, it uses the first agent in its tab.
 - It re-reads the transcript when the followed agent or its status changes. While the
   agent is `working`, it holds the last good list. It reads again once the agent goes
   `idle`, `done` or `blocked`.
