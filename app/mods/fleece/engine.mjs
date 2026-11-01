@@ -293,6 +293,9 @@ async function coreTerminal(address) {
     throw new CoreError(`hc get ${address} did not return JSON`);
   }
 }
+function terminalState(terminal) {
+  return typeof terminal.status === "object" ? terminal.status?.state : terminal.status;
+}
 function agentApp(terminal) {
   return typeof terminal.status === "object" ? terminal.status?.app : void 0;
 }
@@ -338,6 +341,7 @@ async function resolveTerminal(address) {
   const cwd = terminal.foreground?.cwd ?? terminal.cwd;
   const target = {
     paneId: terminal.address ?? address,
+    status: terminalState(terminal),
     agent: isClaude(terminal) ? "claude" : agentApp(terminal) ?? "unknown",
     cwd,
     title: terminal.title
@@ -870,8 +874,22 @@ function withoutFences(text) {
 }
 
 // src/journal.ts
-import { existsSync as existsSync3, mkdirSync as mkdirSync2 } from "node:fs";
+import { existsSync as existsSync3, mkdirSync as mkdirSync2, statSync as statSync2 } from "node:fs";
 import { join as join6 } from "node:path";
+var QUIET_MS = 1e3;
+function isSettled(status, lastWriteMs, now = Date.now()) {
+  if (status !== "idle" && status !== "done") return false;
+  return lastWriteMs === void 0 || now - lastWriteMs >= QUIET_MS;
+}
+function transcriptSettled(target, now = Date.now()) {
+  let lastWriteMs;
+  try {
+    lastWriteMs = target.transcriptPath ? statSync2(target.transcriptPath).mtimeMs : void 0;
+  } catch {
+    lastWriteMs = void 0;
+  }
+  return isSettled(target.status, lastWriteMs, now);
+}
 var DISK = {
   ensureDir(path) {
     mkdirSync2(path, { recursive: true });
@@ -881,9 +899,13 @@ var DISK = {
     writeAtomic(path, text);
   }
 };
-function journalTurns(turns, target, config, io = DISK) {
+function journalTurns(turns, target, config, options) {
+  const io = options.io ?? DISK;
   const result = { written: [], skipped: 0, failed: 0 };
-  const answered = turns.filter((turn) => turn.text !== "");
+  const latest = turns.at(-1);
+  const held = !options.settled && latest !== void 0 ? latest.index : void 0;
+  if (held !== void 0 && latest.text !== "") result.pending = held;
+  const answered = turns.filter((turn) => turn.text !== "" && turn.index !== held);
   if (answered.length === 0) return result;
   try {
     io.ensureDir(config.exportDir);
@@ -914,7 +936,7 @@ function journalSummary(result) {
 }
 
 // src/transcript/reader.ts
-import { closeSync as closeSync2, openSync as openSync2, readSync, statSync as statSync2 } from "node:fs";
+import { closeSync as closeSync2, openSync as openSync2, readSync, statSync as statSync3 } from "node:fs";
 var PREFIX_BYTES = 32;
 function emptyCursor(parser) {
   return {
@@ -928,7 +950,7 @@ function emptyCursor(parser) {
   };
 }
 function readTurnsGrowing(path, createParser, previous) {
-  const info = statSync2(path);
+  const info = statSync3(path);
   const cursor = previous && canContinue(previous, info, path) ? previous : emptyCursor(createParser());
   if (cursor.offset === info.size && cursor.pending.length === 0) {
     return { turns: cursor.parser.snapshot(), cursor };
@@ -1222,7 +1244,9 @@ async function state(flags, config) {
     exportDir: config.exportDir
   };
   if (flags.journal && config.journal) {
-    reply.journal = journalSummary(journalTurns(turns, target, config)) ?? null;
+    const result = journalTurns(turns, target, config, { settled: transcriptSettled(target) });
+    reply.journal = journalSummary(result) ?? null;
+    reply.journalPending = result.pending !== void 0 && (target.status === "idle" || target.status === "done");
   }
   return reply;
 }
@@ -1249,8 +1273,8 @@ async function save(flags, config) {
 }
 async function journal(flags, config) {
   const { target, turns } = await load(flags);
-  const result = journalTurns(turns, target, config);
-  const message2 = `${result.written.length} written \xB7 ${result.skipped} already there` + (result.failed > 0 ? ` \xB7 ${result.failed} failed` : "");
+  const result = journalTurns(turns, target, config, { settled: transcriptSettled(target) });
+  const message2 = `${result.written.length} written \xB7 ${result.skipped} already there` + (result.failed > 0 ? ` \xB7 ${result.failed} failed` : "") + (result.pending !== void 0 ? ` \xB7 turn ${result.pending} still in progress` : "");
   return { ok: true, message: message2, exportDir: config.exportDir };
 }
 async function open(flags, config) {

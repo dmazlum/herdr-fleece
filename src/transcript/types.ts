@@ -47,4 +47,6 @@ export interface Target {
   cwd?: string;
   title?: string;
   transcriptPath?: string;
+  /** Herdr's status for the agent when it was resolved: `idle`, `working`, `done`… */
+  status?: string;
 }
