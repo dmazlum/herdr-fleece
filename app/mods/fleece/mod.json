@@ -1,1 +1,1 @@
-{ "place": "none", "title": "Fleece", "overlay": { "kind": "dialog", "width": 0.7, "height": 0.85 } }
+{ "place": "none", "version": "0.3.0", "title": "Fleece", "overlay": { "kind": "dialog", "width": 0.7, "height": 0.85 } }

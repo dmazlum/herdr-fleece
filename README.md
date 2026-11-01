@@ -101,6 +101,30 @@ description = "copy last answer"
 After a rebuild, toggle the dock off and on — an open pane keeps the modules it loaded
 at startup. Headless actions (`copy`, `save`, `journal`) always run the new build.
 
+## Updates
+
+Herdr updates its own mods, not ones you added: yours is a copy, and nothing tells you
+when this repo changes. To hear about a new version, watch the repo for releases (on
+GitHub: **Watch → Custom → Releases**). Each
+[release](https://github.com/dmazlum/herdr-fleece/releases) says what changed and whether
+`keys.json` did; merge it again when it did.
+
+The terminal plugin updates with `herdr plugin update fleece`; `herdr plugin list`
+shows the version you have.
+
+The app mods don't update by themselves. The version you have is `"version"` in
+`~/.config/herdr-app/mods/fleece/mod.json`. To update, ask your agent to replace the
+`fleece` and `fleece-dock` folders with the latest `app/mods/` ones from
+`github.com/dmazlum/herdr-fleece` (adding them again isn't enough: an agent never
+overwrites a mod, it would add second copies under new names), or by hand:
+
+```sh
+git -C herdr-fleece pull           # or clone it again
+rm -rf ~/.config/herdr-app/mods/fleece ~/.config/herdr-app/mods/fleece-dock
+cp -R herdr-fleece/app/mods/fleece herdr-fleece/app/mods/fleece-dock ~/.config/herdr-app/mods/
+herdr-app check ~/.config/herdr-app/mods/fleece
+```
+
 ## Frame
 
 `fleece.frame` opens the last answer in an overlay. It renders Markdown for reading;
