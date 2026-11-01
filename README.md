@@ -216,7 +216,10 @@ arrows, and Page Up/Down are not bindable.
 
 With `journal = true`, the dock writes new answers as they land. `fleece.journal`
 backfills a session, including one the dock never saw. Files are named by project,
-session, turn, and time; an existing file is left alone.
+session, turn, and time; an existing file is left alone. The latest answer is written
+once the agent is idle and its transcript has been quiet for a second, so a turn still
+in progress never leaves a partial copy behind; `fleece.journal` reports it as still in
+progress.
 
 ## License
 
