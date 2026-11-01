@@ -65,6 +65,7 @@ function targetFrom(pane: PaneAgent): Target {
     sessionId,
     cwd,
     title: pane.terminal_title_stripped,
+    status: pane.agent_status,
   };
 
   target.transcriptPath = locateTranscript(target);

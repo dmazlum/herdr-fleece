@@ -49,4 +49,6 @@ export interface Target {
   transcriptPath?: string;
   /** The transcript is the newest one for `cwd`, not one the session id named. */
   guessed?: boolean;
+  /** Herdr's status for the agent when it was resolved: `idle`, `working`, `done`… */
+  status?: string;
 }

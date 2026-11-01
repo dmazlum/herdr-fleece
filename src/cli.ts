@@ -13,7 +13,7 @@ import {
   paneLayout,
   paneResize,
 } from "./herdr.js";
-import { journalTurns } from "./journal.js";
+import { journalTurns, transcriptSettled } from "./journal.js";
 import { COMMANDS } from "./keys.js";
 import { renderFrame } from "./render/frame.js";
 import { resolveTarget } from "./resolve.js";
@@ -179,10 +179,12 @@ async function journal(flags: Flags): Promise<void> {
   const target = await resolveTarget(flags.pane);
   if (!target.transcriptPath) throw new FleeceError(missingTranscript(target));
 
-  const result = journalTurns(readTargetTurns(target), target, config);
+  const settled = transcriptSettled(target);
+  const result = journalTurns(readTargetTurns(target), target, config, { settled });
   const summary =
     `${result.written.length} written · ${result.skipped} already there` +
-    (result.failed > 0 ? ` · ${result.failed} failed` : "");
+    (result.failed > 0 ? ` · ${result.failed} failed` : "") +
+    (result.pending !== undefined ? ` · turn ${result.pending} still in progress` : "");
 
   await notify("Fleece", `journal: ${summary}`);
   process.stdout.write(`${config.exportDir}\n${summary}\n`);

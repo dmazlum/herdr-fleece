@@ -16,7 +16,7 @@ import {
   paneSendText,
   type PaneRect,
 } from "./herdr.js";
-import { journalSummary, journalTurns } from "./journal.js";
+import { journalSummary, journalTurns, QUIET_MS, transcriptSettled } from "./journal.js";
 import { keyMap, PANEL_CHROME_ROWS, renderPanel } from "./render/panel.js";
 import { CLEAR, enterScreen, KEY, leaveScreen, onKeys, onResize, terminalSize } from "./screen.js";
 import { subscribe, type EventStream, type HerdrEvent, type StreamState } from "./socket.js";
@@ -42,8 +42,12 @@ const POLL_MS = 3000;
  * covers a split the user drags by hand.
  */
 const MEASURE_MS = 2000;
-/** Herdr can report idle a moment before the transcript is flushed. */
-const SETTLE_MS = [0, 300, 1200];
+/**
+ * Herdr can report idle a moment before the transcript is flushed. The last
+ * retry comes after the journal's quiet period, so a finished turn is written
+ * without waiting for the next event.
+ */
+const SETTLE_MS = [0, 300, 1200, QUIET_MS + 1500];
 
 const config = loadConfig();
 const selfPaneId = process.env.HERDR_PANE_ID ?? "";
@@ -179,6 +183,7 @@ async function retarget(paneId: string, force = false): Promise<void> {
     sessionId,
     cwd,
     title: pane.terminal_title_stripped,
+    status: pane.agent_status,
   };
   target.transcriptPath = locateTranscript(target);
   if (!sessionId) guessTranscript(target); // See resolve.ts: only when Herdr named no session.
@@ -208,22 +213,25 @@ function reload(force = false): boolean {
   } catch {
     return false;
   }
-  if (!force && stamp === transcriptStamp) return false;
-  transcriptStamp = stamp;
-
-  try {
-    turns = transcript.read(target.agent, target.transcriptPath, force);
-  } catch {
-    return false;
+  const changed = force || stamp !== transcriptStamp;
+  if (changed) {
+    transcriptStamp = stamp;
+    try {
+      turns = transcript.read(target.agent, target.transcriptPath, force);
+    } catch {
+      return false;
+    }
   }
 
-  // The transcript just changed, which is exactly when there is a new answer
-  // to write. Journalling is idempotent, so the repeat cost is a stat per turn.
-  if (config.journal && target) {
-    journalNote = journalSummary(journalTurns(turns, target, config));
+  // Journal on every look, not only when the transcript changed: the latest
+  // turn becomes writable once it settles, which is a matter of time passing.
+  // Journalling is idempotent, so the repeat cost is a stat per turn.
+  if (config.journal) {
+    const settled = transcriptSettled(target);
+    journalNote = journalSummary(journalTurns(turns, target, config, { settled })) ?? journalNote;
   }
 
-  return recompute();
+  return changed ? recompute() : false;
 }
 
 /** Rebuilds the list from the turns already in memory. */
@@ -241,7 +249,11 @@ function signature(list: Item[]): string {
 function refresh(): void {
   scroll = 0;
   statusLine.clear();
-  // A journal run is worth one fading receipt, not a permanent line.
+  showJournalNote();
+}
+
+/** A journal run is worth one fading receipt, not a permanent line. */
+function showJournalNote(): void {
   statusLine.show(journalNote);
   journalNote = undefined;
   draw();
@@ -255,6 +267,7 @@ function reloadSoon(): void {
   for (const delay of SETTLE_MS) {
     const timer = setTimeout(() => {
       if (reload()) refresh();
+      else if (journalNote) showJournalNote();
     }, delay);
     timer.unref?.();
   }
@@ -271,6 +284,7 @@ function watchStatus(): void {
     (event) => {
       if (event.kind !== "pane_agent_status_changed") return;
       const state = event.data["agent_status"];
+      if (target && typeof state === "string") target.status = state;
       if (state === "idle" || state === "done") reloadSoon();
     },
   );

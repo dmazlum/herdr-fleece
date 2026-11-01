@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { agentApp, isClaude, isCodex, sessionIdForPid, terminalAgent, type CoreTerminal } from "./core.js";
+import {
+  agentApp,
+  isClaude,
+  isCodex,
+  sessionIdForPid,
+  terminalAgent,
+  terminalState,
+  type CoreTerminal,
+} from "./core.js";
 
 const reported: CoreTerminal = {
   address: "t8",
@@ -56,4 +64,10 @@ test("a terminal's agent name matches the transcript registry", () => {
   assert.equal(terminalAgent(reported), "claude");
   assert.equal(terminalAgent({ address: "t5", status: { app: "aider" } }), "aider");
   assert.equal(terminalAgent({ address: "t6", foreground: { argv: ["zsh"] } }), "unknown");
+});
+
+test("a terminal's state comes from its status object or string", () => {
+  assert.equal(terminalState(reported), "working");
+  assert.equal(terminalState({ address: "t6", status: "idle" }), "idle");
+  assert.equal(terminalState({ address: "t7" }), undefined);
 });
