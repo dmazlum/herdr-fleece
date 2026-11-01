@@ -12,7 +12,8 @@ const run = promisify(execFile);
  * Resolves a herdr-core terminal (`t8`) to the agent transcript behind it, for
  * the Herdr desktop app. The app has no plugin context and no session id on its
  * agents, so the chain is: core terminal → its foreground process → the
- * session file Claude Code keeps per pid → the transcript.
+ * session file Claude Code keeps per pid → the transcript. Codex keeps no such
+ * file, so a Codex terminal gets the newest top-level rollout for its folder.
  */
 
 export class CoreError extends Error {}
@@ -54,6 +55,25 @@ export function isClaude(terminal: CoreTerminal): boolean {
   return /(^|\/)claude$/.test(head);
 }
 
+/**
+ * Codex runs as its native binary, or through the npm launcher as
+ * `node …/bin/codex.js`, so both argv shapes count.
+ */
+export function isCodex(terminal: CoreTerminal): boolean {
+  const app = agentApp(terminal);
+  if (app === "codex" || app?.startsWith("codex-")) return true;
+  const [head = "", script = ""] = terminal.foreground?.argv ?? [];
+  if (/(^|\/)codex$/.test(head)) return true;
+  return /(^|\/)node$/.test(head) && /(^|\/)codex(\.js)?$/.test(script);
+}
+
+/** Herdr's name for the agent in a terminal, as the transcript registry knows it. */
+export function terminalAgent(terminal: CoreTerminal): string {
+  if (isClaude(terminal)) return "claude";
+  if (isCodex(terminal)) return "codex";
+  return agentApp(terminal) ?? "unknown";
+}
+
 export function claudeSessionsDir(): string {
   const base = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
   return join(base, "sessions");
@@ -83,7 +103,7 @@ export async function resolveTerminal(address: string): Promise<Target> {
   const cwd = terminal.foreground?.cwd ?? terminal.cwd;
   const target: Target = {
     paneId: terminal.address ?? address,
-    agent: isClaude(terminal) ? "claude" : (agentApp(terminal) ?? "unknown"),
+    agent: terminalAgent(terminal),
     cwd,
     title: terminal.title,
   };
@@ -96,8 +116,7 @@ export async function resolveTerminal(address: string): Promise<Target> {
   // Without a session id the newest transcript for the folder is a guess, used last.
   if (!target.transcriptPath && cwd) {
     target.transcriptPath = agent.newest(cwd);
-    const file = target.transcriptPath?.split("/").pop();
-    if (file) target.sessionId ??= file.replace(/\.jsonl$/, "");
+    if (target.transcriptPath) target.sessionId ??= agent.sessionOf(target.transcriptPath);
   }
   return target;
 }

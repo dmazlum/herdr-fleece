@@ -26,12 +26,12 @@ function parseCommand(text) {
 function launch(argv) {
   const [bin, ...args] = argv;
   if (!bin) return Promise.reject(new Error("no command to open with"));
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     const child = spawn(bin, args, { detached: true, stdio: "ignore" });
     child.once("error", reject);
     child.once("spawn", () => {
       child.unref();
-      resolve3();
+      resolve4();
     });
   });
 }
@@ -226,9 +226,12 @@ function int(table, key) {
 // src/core.ts
 import { execFile } from "node:child_process";
 import { readFileSync as readFileSync2 } from "node:fs";
-import { homedir as homedir3 } from "node:os";
-import { join as join3 } from "node:path";
+import { homedir as homedir4 } from "node:os";
+import { join as join4 } from "node:path";
 import { promisify } from "node:util";
+
+// src/transcript/agents.ts
+import { basename } from "node:path";
 
 // src/transcript/reader.ts
 import { closeSync, openSync, readSync, statSync } from "node:fs";
@@ -522,6 +525,432 @@ function newestClaudeTranscript(cwd) {
   return best?.path;
 }
 
+// src/transcript/codex.ts
+import { isAbsolute, resolve as resolve2 } from "node:path";
+var ZERO = { input: 0, cached: 0, cacheWrite: 0, output: 0 };
+var PATCH_FILE = /^\*\*\* (Add|Update|Delete) File: (.+)$|^\*\*\* Move to: (.+)$/;
+var CodexParser = class {
+  #closed = [];
+  #current = null;
+  /** A subagent's rollout (a guardian review, a spawned worker) is not the user's conversation. */
+  #ignored = false;
+  #cwd;
+  #model;
+  #gitBranch;
+  #version;
+  #totals = { ...ZERO };
+  ingest(value) {
+    if (this.#ignored || typeof value !== "object" || value === null) return;
+    const record = value;
+    const payload = record.payload;
+    if (typeof payload !== "object" || payload === null) return;
+    switch (record.type) {
+      case "session_meta":
+        this.#meta(payload);
+        return;
+      case "turn_context":
+        this.#context(payload);
+        return;
+      case "event_msg":
+        this.#event(payload, record.timestamp);
+        return;
+      case "response_item":
+        this.#item(payload, record.timestamp);
+        return;
+    }
+  }
+  snapshot() {
+    if (!this.#current) return this.#closed.slice();
+    return [...this.#closed, finish2(cloneOpen(this.#current))];
+  }
+  #meta(payload) {
+    const source = payload["source"];
+    if (typeof source === "object" && source !== null && "subagent" in source) {
+      this.#ignored = true;
+      return;
+    }
+    this.#cwd = str2(payload["cwd"]) ?? this.#cwd;
+    this.#version = str2(payload["cli_version"]) ?? this.#version;
+    const git = payload["git"];
+    if (typeof git === "object" && git !== null) {
+      this.#gitBranch = str2(git["branch"]) ?? this.#gitBranch;
+    }
+  }
+  /** Settings for the turn about to run. It lands before that turn's prompt. */
+  #context(payload) {
+    this.#cwd = str2(payload["cwd"]) ?? this.#cwd;
+    this.#model = str2(payload["model"]) ?? this.#model;
+  }
+  #event(payload, at) {
+    switch (payload["type"]) {
+      case "user_message": {
+        const kind = str2(payload["kind"]);
+        if (kind !== void 0 && kind !== "plain") return;
+        this.#prompt(str2(payload["message"]) ?? "", at);
+        return;
+      }
+      case "item_completed": {
+        const item = payload["item"];
+        if (typeof item !== "object" || item === null) return;
+        const typed = item;
+        if (typed["type"] === "UserMessage") this.#prompt(contentText(typed["content"]), at);
+        else if (typed["type"] === "FileChange" && this.#current) {
+          addChanges(this.#current.changed, typed["changes"]);
+          touch(this.#current, at);
+        }
+        return;
+      }
+      case "token_count": {
+        const totals = totalsOf(payload["info"]);
+        if (!totals) return;
+        this.#totals = totals;
+        if (this.#current) this.#current.latest = totals;
+        return;
+      }
+      case "task_complete": {
+        const open2 = this.#current;
+        if (!open2) return;
+        open2.lastAgentMessage = str2(payload["last_agent_message"]) ?? open2.lastAgentMessage;
+        const ms = payload["duration_ms"];
+        if (typeof ms === "number" && Number.isFinite(ms) && ms >= 0) open2.turn.durationMs = ms;
+        touch(open2, at);
+        return;
+      }
+    }
+  }
+  #item(payload, at) {
+    const open2 = this.#current;
+    if (!open2) return;
+    switch (payload["type"]) {
+      case "message": {
+        if (payload["role"] !== "assistant") return;
+        const text = contentText(payload["content"]);
+        if (text === "") return;
+        open2.messages.push({ text, phase: str2(payload["phase"]) });
+        touch(open2, at);
+        return;
+      }
+      case "reasoning": {
+        const summary = summaryText(payload["summary"]);
+        if (summary === "") return;
+        open2.turn.thinking = open2.turn.thinking === "" ? summary : `${open2.turn.thinking}
+
+${summary}`;
+        return;
+      }
+      case "function_call":
+      case "custom_tool_call": {
+        const name = str2(payload["name"]) ?? "tool";
+        addToolUse2(open2.turn.toolUses, name);
+        if (name === "apply_patch") {
+          const patch = patchText(payload["input"] ?? payload["arguments"]);
+          addPatchPaths(open2.patched, patch, open2.turn.cwd);
+        }
+        touch(open2, at);
+        return;
+      }
+      case "local_shell_call":
+        addToolUse2(open2.turn.toolUses, "shell");
+        touch(open2, at);
+        return;
+      case "web_search_call":
+        addToolUse2(open2.turn.toolUses, "web_search");
+        touch(open2, at);
+        return;
+    }
+  }
+  #prompt(raw, at) {
+    const prompt = raw.trim();
+    if (prompt === "") return;
+    const open2 = this.#current;
+    if (open2 && open2.turn.prompt === prompt && !hasActivity(open2)) return;
+    if (open2) this.#closed.push(finish2(open2));
+    this.#current = {
+      turn: {
+        index: this.#closed.length + 1,
+        prompt,
+        promptAt: at,
+        text: "",
+        thinking: "",
+        toolUses: [],
+        files: [],
+        usage: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+        model: this.#model,
+        gitBranch: this.#gitBranch,
+        cwd: this.#cwd,
+        agentVersion: this.#version
+      },
+      messages: [],
+      changed: [],
+      patched: [],
+      baseline: this.#totals,
+      latest: this.#totals
+    };
+  }
+};
+var codexParser = () => new CodexParser();
+function answerText(messages, lastAgentMessage) {
+  let text;
+  if (messages.some((message2) => message2.phase !== void 0)) {
+    text = messages.filter((message2) => message2.phase === "final_answer").map((message2) => message2.text).join("\n\n");
+  } else {
+    text = messages.at(-1)?.text ?? "";
+  }
+  if (text.trim() === "" && messages.length === 0) text = lastAgentMessage ?? "";
+  return text.trim();
+}
+function finish2(open2) {
+  const turn = open2.turn;
+  turn.text = answerText(open2.messages, open2.lastAgentMessage);
+  turn.thinking = turn.thinking.trim();
+  turn.files = (open2.changed.length > 0 ? open2.changed : open2.patched).slice();
+  turn.files.sort((left, right) => right.edits - left.edits);
+  turn.usage = usageBetween(open2.baseline, open2.latest);
+  if (turn.durationMs === void 0 && turn.promptAt && turn.endedAt) {
+    const ms = Date.parse(turn.endedAt) - Date.parse(turn.promptAt);
+    if (Number.isFinite(ms) && ms >= 0) turn.durationMs = ms;
+  }
+  return turn;
+}
+function cloneOpen(open2) {
+  return {
+    ...open2,
+    turn: {
+      ...open2.turn,
+      toolUses: open2.turn.toolUses.map((use) => ({ ...use })),
+      files: [],
+      usage: { ...open2.turn.usage }
+    },
+    messages: open2.messages.slice(),
+    changed: open2.changed.map((file) => ({ ...file })),
+    patched: open2.patched.map((file) => ({ ...file }))
+  };
+}
+function hasActivity(open2) {
+  return open2.messages.length > 0 || open2.turn.toolUses.length > 0 || open2.changed.length > 0 || open2.turn.thinking !== "";
+}
+function touch(open2, at) {
+  if (at) open2.turn.endedAt = at;
+}
+function usageBetween(from, to) {
+  const delta = (key) => Math.max(0, to[key] - from[key]);
+  const cached = delta("cached");
+  return {
+    input: Math.max(0, delta("input") - cached),
+    output: delta("output"),
+    cacheRead: cached,
+    cacheCreation: delta("cacheWrite")
+  };
+}
+function totalsOf(info) {
+  if (typeof info !== "object" || info === null) return void 0;
+  const total = info["total_token_usage"];
+  if (typeof total !== "object" || total === null) return void 0;
+  const raw = total;
+  return {
+    input: num2(raw["input_tokens"]),
+    cached: num2(raw["cached_input_tokens"]),
+    cacheWrite: num2(raw["cache_write_input_tokens"]),
+    output: num2(raw["output_tokens"])
+  };
+}
+function addChanges(files, changes) {
+  if (typeof changes !== "object" || changes === null || Array.isArray(changes)) return;
+  for (const [path, change] of Object.entries(changes)) {
+    const detail = typeof change === "object" && change !== null ? change : {};
+    if (detail["type"] === "delete") continue;
+    addFile(files, str2(detail["move_path"]) ?? path);
+  }
+}
+function patchText(raw) {
+  if (typeof raw !== "string") return "";
+  if (raw.trimStart().startsWith("{")) {
+    try {
+      const parsed = JSON.parse(raw);
+      return str2(parsed["input"]) ?? str2(parsed["patch"]) ?? "";
+    } catch {
+      return raw;
+    }
+  }
+  return raw;
+}
+function addPatchPaths(files, patch, cwd) {
+  const seen = /* @__PURE__ */ new Set();
+  let section2;
+  for (const line of patch.split("\n")) {
+    const match = PATCH_FILE.exec(line.trimEnd());
+    if (!match) continue;
+    const [, action, target, movedTo] = match;
+    const raw = (target ?? movedTo ?? "").trim();
+    if (raw === "") continue;
+    const path = isAbsolute(raw) || !cwd ? raw : resolve2(cwd, raw);
+    if (movedTo !== void 0) {
+      if (section2 !== void 0) seen.delete(section2);
+      seen.add(path);
+    } else if (action === "Delete") {
+      seen.delete(path);
+      section2 = void 0;
+    } else {
+      seen.add(path);
+      section2 = path;
+    }
+  }
+  for (const path of seen) addFile(files, path);
+}
+function addFile(files, path) {
+  if (path.trim() === "") return;
+  const existing = files.find((file) => file.path === path);
+  if (existing) existing.edits += 1;
+  else files.push({ path, edits: 1 });
+}
+function addToolUse2(uses, name) {
+  const existing = uses.find((use) => use.name === name);
+  if (existing) existing.count += 1;
+  else uses.push({ name, count: 1 });
+}
+function contentText(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map(
+    (part) => typeof part === "object" && part !== null ? str2(part["text"]) : void 0
+  ).filter((text) => text !== void 0 && text !== "").join("\n\n");
+}
+function summaryText(summary) {
+  if (!Array.isArray(summary)) return "";
+  return summary.map(
+    (part) => typeof part === "string" ? part : typeof part === "object" && part !== null ? str2(part["text"]) : void 0
+  ).filter((text) => text !== void 0 && text.trim() !== "").join("\n\n");
+}
+function str2(value) {
+  return typeof value === "string" ? value : void 0;
+}
+function num2(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+// src/transcript/codex-files.ts
+import { closeSync as closeSync2, existsSync as existsSync2, openSync as openSync2, readdirSync as readdirSync2, readSync as readSync2, statSync as statSync3 } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { join as join3 } from "node:path";
+function codexHome() {
+  return process.env.CODEX_HOME ?? join3(homedir3(), ".codex");
+}
+function codexSessionsDir() {
+  return join3(codexHome(), "sessions");
+}
+function archivedDir() {
+  return join3(codexHome(), "archived_sessions");
+}
+function codexSessionId(path) {
+  const match = /-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i.exec(path);
+  return match?.[1];
+}
+var found = /* @__PURE__ */ new Map();
+function findCodexTranscript(sessionId) {
+  if (sessionId === "" || /[/\\]/.test(sessionId)) return null;
+  const cached = found.get(sessionId);
+  if (cached && existsSync2(cached)) return cached;
+  const suffix = `-${sessionId}.jsonl`;
+  for (const dir of [...dayDirs(codexSessionsDir()), archivedDir()]) {
+    const name = list(dir).find((entry) => entry.startsWith("rollout-") && entry.endsWith(suffix));
+    if (name) {
+      const path = join3(dir, name);
+      found.set(sessionId, path);
+      return path;
+    }
+  }
+  return null;
+}
+var NEWEST_SCAN_LIMIT = 200;
+function newestCodexTranscript(cwd) {
+  const candidates = [];
+  for (const dir of dayDirs(codexSessionsDir())) {
+    for (const entry of list(dir)) {
+      if (!entry.startsWith("rollout-") || !entry.endsWith(".jsonl")) continue;
+      const path = join3(dir, entry);
+      try {
+        candidates.push({ path, mtime: statSync3(path).mtimeMs });
+      } catch {
+      }
+    }
+  }
+  candidates.sort((left, right) => right.mtime - left.mtime);
+  for (const { path } of candidates.slice(0, NEWEST_SCAN_LIMIT)) {
+    const meta = sessionMeta(path);
+    if (meta && meta.cwd === cwd && !meta.subagent) return path;
+  }
+  return void 0;
+}
+function dayDirs(root) {
+  const dirs = [];
+  for (const year of numbered(root)) {
+    for (const month of numbered(join3(root, year))) {
+      for (const day of numbered(join3(root, year, month))) {
+        dirs.push(join3(root, year, month, day));
+      }
+    }
+  }
+  return dirs;
+}
+function numbered(dir) {
+  return list(dir).filter((entry) => /^\d+$/.test(entry)).sort((left, right) => Number(right) - Number(left));
+}
+function list(dir) {
+  try {
+    return readdirSync2(dir);
+  } catch {
+    return [];
+  }
+}
+var META_MAX_BYTES = 1024 * 1024;
+function sessionMeta(path) {
+  const line = firstLine(path);
+  if (line === void 0) return void 0;
+  try {
+    const record = JSON.parse(line);
+    if (record.type !== "session_meta" || typeof record.payload !== "object" || !record.payload) {
+      return void 0;
+    }
+    const cwd = record.payload["cwd"];
+    const source = record.payload["source"];
+    return {
+      cwd: typeof cwd === "string" ? cwd : void 0,
+      subagent: typeof source === "object" && source !== null && "subagent" in source
+    };
+  } catch {
+    return void 0;
+  }
+}
+function firstLine(path) {
+  let fd;
+  try {
+    fd = openSync2(path, "r");
+  } catch {
+    return void 0;
+  }
+  try {
+    const chunks = [];
+    let total = 0;
+    const buf = Buffer.alloc(64 * 1024);
+    while (total < META_MAX_BYTES) {
+      const n = readSync2(fd, buf, 0, buf.length, total);
+      if (n === 0) break;
+      const newline = buf.subarray(0, n).indexOf(10);
+      if (newline !== -1) {
+        chunks.push(Buffer.from(buf.subarray(0, newline)));
+        return Buffer.concat(chunks).toString("utf8");
+      }
+      chunks.push(Buffer.from(buf.subarray(0, n)));
+      total += n;
+    }
+    return total > 0 && total < META_MAX_BYTES ? Buffer.concat(chunks).toString("utf8") : void 0;
+  } catch {
+    return void 0;
+  } finally {
+    closeSync2(fd);
+  }
+}
+
 // src/transcript/agents.ts
 var claude = {
   id: "claude",
@@ -529,9 +958,19 @@ var claude = {
   createParser: claudeParser,
   home: claudeProjectsDir,
   find: findClaudeTranscript,
-  newest: newestClaudeTranscript
+  newest: newestClaudeTranscript,
+  sessionOf: (path) => basename(path, ".jsonl") || void 0
 };
-var AGENTS = [claude];
+var codex = {
+  id: "codex",
+  label: "Codex",
+  createParser: codexParser,
+  home: codexSessionsDir,
+  find: (sessionId) => findCodexTranscript(sessionId),
+  newest: newestCodexTranscript,
+  sessionOf: codexSessionId
+};
+var AGENTS = [claude, codex];
 function agentTranscripts(agent) {
   return AGENTS.find((entry) => entry.id === agent);
 }
@@ -586,13 +1025,25 @@ function isClaude(terminal) {
   const head = terminal.foreground?.argv?.[0] ?? "";
   return /(^|\/)claude$/.test(head);
 }
+function isCodex(terminal) {
+  const app = agentApp(terminal);
+  if (app === "codex" || app?.startsWith("codex-")) return true;
+  const [head = "", script = ""] = terminal.foreground?.argv ?? [];
+  if (/(^|\/)codex$/.test(head)) return true;
+  return /(^|\/)node$/.test(head) && /(^|\/)codex(\.js)?$/.test(script);
+}
+function terminalAgent(terminal) {
+  if (isClaude(terminal)) return "claude";
+  if (isCodex(terminal)) return "codex";
+  return agentApp(terminal) ?? "unknown";
+}
 function claudeSessionsDir() {
-  const base = process.env.CLAUDE_CONFIG_DIR ?? join3(homedir3(), ".claude");
-  return join3(base, "sessions");
+  const base = process.env.CLAUDE_CONFIG_DIR ?? join4(homedir4(), ".claude");
+  return join4(base, "sessions");
 }
 function sessionIdForPid(pid, read = (path) => readFileSync2(path, "utf8")) {
   try {
-    const record = JSON.parse(read(join3(claudeSessionsDir(), `${pid}.json`)));
+    const record = JSON.parse(read(join4(claudeSessionsDir(), `${pid}.json`)));
     return typeof record?.sessionId === "string" && record.sessionId !== "" ? record.sessionId : void 0;
   } catch {
     return void 0;
@@ -603,7 +1054,7 @@ async function resolveTerminal(address) {
   const cwd = terminal.foreground?.cwd ?? terminal.cwd;
   const target = {
     paneId: terminal.address ?? address,
-    agent: isClaude(terminal) ? "claude" : agentApp(terminal) ?? "unknown",
+    agent: terminalAgent(terminal),
     cwd,
     title: terminal.title
   };
@@ -614,15 +1065,14 @@ async function resolveTerminal(address) {
   target.transcriptPath = locateTranscript(target);
   if (!target.transcriptPath && cwd) {
     target.transcriptPath = agent.newest(cwd);
-    const file = target.transcriptPath?.split("/").pop();
-    if (file) target.sessionId ??= file.replace(/\.jsonl$/, "");
+    if (target.transcriptPath) target.sessionId ??= agent.sessionOf(target.transcriptPath);
   }
   return target;
 }
 
 // src/export/clipboard.ts
 import { execFile as execFile2 } from "node:child_process";
-import { openSync as openSync2, writeSync, closeSync as closeSync2 } from "node:fs";
+import { openSync as openSync3, writeSync, closeSync as closeSync3 } from "node:fs";
 import { promisify as promisify2 } from "node:util";
 var run2 = promisify2(execFile2);
 var TOOLS = {
@@ -656,7 +1106,7 @@ function writeOsc52(text) {
   const payload = `\x1B]52;c;${Buffer.from(text, "utf8").toString("base64")}\x07`;
   let fd;
   try {
-    fd = openSync2("/dev/tty", "w");
+    fd = openSync3("/dev/tty", "w");
   } catch {
     if (process.stdout.isTTY) {
       process.stdout.write(payload);
@@ -670,7 +1120,7 @@ function writeOsc52(text) {
   } catch {
     return false;
   } finally {
-    closeSync2(fd);
+    closeSync3(fd);
   }
 }
 
@@ -711,7 +1161,7 @@ function codeOnly(markdown) {
 
 // src/export/markdown.ts
 import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { basename, join as join4 } from "node:path";
+import { basename as basename2, join as join5 } from "node:path";
 function buildMarkdown(turn, target, config) {
   const parts = [];
   if (config.frontMatter) parts.push(frontMatter(turn, target));
@@ -734,12 +1184,12 @@ ${turn.thinking}
 }
 async function saveMarkdown(turn, target, config) {
   mkdirSync(config.exportDir, { recursive: true });
-  const path = join4(config.exportDir, fileName(turn, target));
+  const path = join5(config.exportDir, fileName(turn, target));
   writeAtomic(path, buildMarkdown(turn, target, config));
   return path;
 }
 function fileName(turn, target) {
-  const project = slug(target.cwd ? basename(target.cwd) : "session");
+  const project = slug(target.cwd ? basename2(target.cwd) : "session");
   const session = slug(target.sessionId ?? target.paneId ?? "session").slice(0, 12);
   const index = String(turn.index).padStart(2, "0");
   return `${project}-${session}-turn${index}-${stamp(turn.endedAt)}.md`;
@@ -794,9 +1244,9 @@ function stamp(iso) {
 }
 
 // src/extract.ts
-import { existsSync as existsSync2 } from "node:fs";
-import { homedir as homedir4 } from "node:os";
-import { join as join5, resolve as resolve2 } from "node:path";
+import { existsSync as existsSync3 } from "node:fs";
+import { homedir as homedir5 } from "node:os";
+import { join as join6, resolve as resolve3 } from "node:path";
 
 // src/render/text.ts
 var ESC = String.fromCharCode(27);
@@ -987,10 +1437,10 @@ var COMMAND_HEADS = /* @__PURE__ */ new Set([
 var MAX_PER_KIND = 12;
 var LONG_LINE = 800;
 function resolvePath(text, cwd) {
-  if (text.startsWith("~/")) return join5(homedir4(), text.slice(2));
+  if (text.startsWith("~/")) return join6(homedir5(), text.slice(2));
   if (text.startsWith("/")) return text;
   if (!cwd) return null;
-  return resolve2(cwd, text);
+  return resolve3(cwd, text);
 }
 function extractItems(turns, options = {}) {
   const answered = turns.filter((turn) => turn.text !== "");
@@ -1004,7 +1454,7 @@ function extractItems(turns, options = {}) {
     seen.add(key);
     items.push(item);
   };
-  const exists = options.exists ?? existsSync2;
+  const exists = options.exists ?? existsSync3;
   const edited = /* @__PURE__ */ new Set();
   const scopes = recent.map((turn) => {
     const base = turn.cwd ?? options.cwd;
@@ -1139,13 +1589,13 @@ function withoutFences(text) {
 }
 
 // src/journal.ts
-import { existsSync as existsSync3, mkdirSync as mkdirSync2 } from "node:fs";
-import { join as join6 } from "node:path";
+import { existsSync as existsSync4, mkdirSync as mkdirSync2 } from "node:fs";
+import { join as join7 } from "node:path";
 var DISK = {
   ensureDir(path) {
     mkdirSync2(path, { recursive: true });
   },
-  exists: existsSync3,
+  exists: existsSync4,
   write(path, text) {
     writeAtomic(path, text);
   }
@@ -1161,7 +1611,7 @@ function journalTurns(turns, target, config, io = DISK) {
     return result;
   }
   for (const turn of answered) {
-    const path = join6(config.exportDir, fileName(turn, target));
+    const path = join7(config.exportDir, fileName(turn, target));
     if (io.exists(path)) {
       result.skipped += 1;
       continue;

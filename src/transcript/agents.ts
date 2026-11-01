@@ -1,5 +1,13 @@
+import { basename } from "node:path";
 import { claudeParser } from "./claude.js";
 import { claudeProjectsDir, findClaudeTranscript, newestClaudeTranscript } from "./claude-files.js";
+import { codexParser } from "./codex.js";
+import {
+  codexSessionId,
+  codexSessionsDir,
+  findCodexTranscript,
+  newestCodexTranscript,
+} from "./codex-files.js";
 import { readTurnsGrowing, TranscriptWatch, type ParserFactory } from "./reader.js";
 import type { Target, Turn } from "./types.js";
 
@@ -20,6 +28,8 @@ export interface AgentTranscripts {
   find(sessionId: string, cwd?: string): string | null;
   /** A guess when no session id is known: the newest transcript for that cwd. */
   newest(cwd: string): string | undefined;
+  /** The session id a transcript path belongs to, for a target found by {@link newest}. */
+  sessionOf(path: string): string | undefined;
 }
 
 const claude: AgentTranscripts = {
@@ -29,9 +39,21 @@ const claude: AgentTranscripts = {
   home: claudeProjectsDir,
   find: findClaudeTranscript,
   newest: newestClaudeTranscript,
+  sessionOf: (path) => basename(path, ".jsonl") || undefined,
 };
 
-const AGENTS: readonly AgentTranscripts[] = [claude];
+/** Rollout file names carry the session id, so the folder a session ran in is not needed. */
+const codex: AgentTranscripts = {
+  id: "codex",
+  label: "Codex",
+  createParser: codexParser,
+  home: codexSessionsDir,
+  find: (sessionId) => findCodexTranscript(sessionId),
+  newest: newestCodexTranscript,
+  sessionOf: codexSessionId,
+};
+
+const AGENTS: readonly AgentTranscripts[] = [claude, codex];
 
 export function agentTranscripts(agent: string | undefined): AgentTranscripts | undefined {
   return AGENTS.find((entry) => entry.id === agent);

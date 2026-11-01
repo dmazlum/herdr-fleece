@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { agentApp, isClaude, sessionIdForPid, type CoreTerminal } from "./core.js";
+import { agentApp, isClaude, isCodex, sessionIdForPid, terminalAgent, type CoreTerminal } from "./core.js";
 
 const reported: CoreTerminal = {
   address: "t8",
@@ -40,4 +40,20 @@ test("a missing or malformed session file gives no session", () => {
   );
   assert.equal(sessionIdForPid(1, () => "{not json"), undefined);
   assert.equal(sessionIdForPid(1, () => JSON.stringify({ sessionId: "" })), undefined);
+});
+
+test("codex is recognised by what it reported or by its argv", () => {
+  assert.equal(terminalAgent({ address: "t1", status: { app: "codex" } }), "codex");
+  assert.equal(terminalAgent({ address: "t2", foreground: { argv: ["/opt/homebrew/bin/codex"] } }), "codex");
+  assert.equal(
+    terminalAgent({ address: "t3", foreground: { argv: ["node", "/usr/lib/node_modules/@openai/codex/bin/codex.js"] } }),
+    "codex",
+  );
+  assert.equal(isCodex({ address: "t4", foreground: { argv: ["codexify"] } }), false);
+});
+
+test("a terminal's agent name matches the transcript registry", () => {
+  assert.equal(terminalAgent(reported), "claude");
+  assert.equal(terminalAgent({ address: "t5", status: { app: "aider" } }), "aider");
+  assert.equal(terminalAgent({ address: "t6", foreground: { argv: ["zsh"] } }), "unknown");
 });
