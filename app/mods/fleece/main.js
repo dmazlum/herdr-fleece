@@ -302,11 +302,32 @@ export default class Fleece extends View {
   }
 
   button(id, label, t, handler) {
-    return div().id(id).px(7).h(22).flex().items_center().rounded(5).text_size(11).text_color(t.muted)
+    return div().id(id).px(7).h(22).flex().items_center().rounded(6).text_size(11).text_color(t.muted)
       .cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_click((_e, cx) => handler(cx))
       .child(label);
+  }
+
+  // A button that shows its key in the accent color: `y Copy`, `Newer ]`.
+  keyButton(id, key, label, t, handler, after = false) {
+    const k = div().text_color(t.accent).font_medium().child(key);
+    return h_flex().id(id).px(7).h(22).gap(4).items_center().rounded(6).text_size(11).text_color(t.muted)
+      .cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => handler(cx))
+      .when(!after, (el) => el.child(k))
+      .child(div().child(label))
+      .when(after, (el) => el.child(k));
+  }
+
+  // `live` with a slowly breathing dot, or `pinned` with a still one.
+  status(pinned, t) {
+    const color = pinned ? t.blocked : t.done;
+    return h_flex().flex_none().gap(5).items_center().text_size(10.5).text_color(color)
+      .child(div().size(6).rounded(3).bg(color)
+        .when(!pinned, (el) => el.loop("opacity", { from: 0.35, to: 1, period: 1600 })))
+      .child(pinned ? "pinned" : "live");
   }
 
   message(root, t, text) {
@@ -321,18 +342,20 @@ export default class Fleece extends View {
 
     const mono = settings().font_family ?? "JetBrains Mono";
     const items = d.items ?? [];
-    const header = h_flex().h(30).flex_none().px(10).gap(6).items_center().border_b_1().border_color(t.border)
-      .child(div().font_semibold().child("Fleece"))
+    const header = h_flex().h(34).flex_none().px(12).gap(7).items_center().border_b_1().border_color(t.border)
+      .child(div().font_semibold().text_size(12.5).child("Fleece"))
       .child(div().flex_1().min_w(0).truncate().text_color(t.dim).text_size(11).child(d.label))
-      .child(div().text_size(10.5).text_color(d.pinned ? t.blocked : t.idle).child(d.pinned ? "pinned" : "live"));
+      .child(this.status(d.pinned, t));
 
     const sections = SECTIONS.map(([kind, title]) => [title, items.filter((i) => i.kind === kind)])
       .filter(([, rows]) => rows.length > 0);
 
-    const list = v_flex().id("fleece-items").flex_1().min_h(0).overflow_y_scrollbar().py(6).gap(8)
+    const list = v_flex().id("fleece-items").flex_1().min_h(0).overflow_y_scrollbar().py(8).gap(10)
       .when(sections.length === 0, (el) => el.child(div().px(12).text_color(t.dim).child("Nothing to carry out of these turns.")))
       .children(sections.map(([title, rows]) => v_flex().gap(1)
-        .child(div().px(12).text_size(10.5).font_medium().text_color(t.dim).child(title))
+        .child(h_flex().px(12).pb(2).gap(6).items_center()
+          .child(div().text_size(10.5).font_medium().text_color(t.dim).child(title))
+          .child(div().text_size(10).text_color(t.dim).opacity(0.6).child(String(rows.length))))
         .children(rows.map((item, n) => this.row(item, `${title}-${n}`, t, mono)))));
 
     const hint = this.armed === "relay-to"
@@ -345,9 +368,9 @@ export default class Fleece extends View {
 
     const footer = v_flex().flex_none().border_t_1().border_color(t.border).px(6).py(4).gap(2)
       .child(h_flex().gap(2).flex_wrap()
-        .child(this.button("f-copy", "Copy all", t, (cx) => this.act(["copy", ...this.turnArgs()], cx)))
-        .child(this.button("f-save", "Save", t, (cx) => this.act(["save", ...this.turnArgs()], cx)))
-        .child(this.button("f-frame", "Frame", t, () => this.openFrame()))
+        .child(this.keyButton("f-copy", k["copy-answer"], "Copy all", t, (cx) => this.act(["copy", ...this.turnArgs()], cx)))
+        .child(this.keyButton("f-save", k.save, "Save", t, (cx) => this.act(["save", ...this.turnArgs()], cx)))
+        .child(this.keyButton("f-frame", k.frame, "Frame", t, () => this.openFrame()))
         .child(div().flex_1())
         .child(this.button("f-older", "‹", t, (cx) => this.step(-1, cx)))
         .child(this.button("f-newer", "›", t, (cx) => this.step(1, cx))))
@@ -358,11 +381,13 @@ export default class Fleece extends View {
 
   row(item, id, t, mono) {
     const code = item.kind === "code" || item.kind === "command";
-    return h_flex().id(`row-${id}`).h(24).mx(4).px(6).gap(6).items_center().rounded(5).cursor_pointer()
-      .hover((s) => s.bg(t.hover))
+    return h_flex().id(`row-${id}`).h(26).mx(4).px(6).gap(6).items_center().rounded(6).cursor_pointer()
+      .border_l_2().border_color(t.accent + "00")
+      .hover((s) => s.bg(t.hover).border_color(t.accent))
       .on_click((_e, cx) => this.copyItem(item, cx))
       .child(div().w(14).flex_none().text_size(10.5).text_color(this.armed ? t.accent : t.dim).child(item.key ?? ""))
-      .when(Boolean(item.tag), (el) => el.child(div().flex_none().text_size(10).text_color(t.dim).child(item.tag)))
+      .when(Boolean(item.tag), (el) => el.child(div().flex_none().px(4).h(16).flex().items_center().rounded(4)
+        .bg(t.accent + "1f").text_size(10).text_color(t.accent).child(item.tag)))
       .child(div().flex_1().min_w(0).truncate().when(code, (el) => el.font_family(mono).text_size(11.5)).child(item.label))
       .when(Boolean(item.detail), (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(item.detail)))
       .child(this.button(`send-${id}`, "send", t, (cx) => this.sendItem(item, cx)))
@@ -381,24 +406,28 @@ export default class Fleece extends View {
     const meta = [`turn ${turn.index}`, turn.model, d.pinned ? `${d.answers.length - 1 - d.answers.indexOf(turn.index)} back` : null]
       .filter(Boolean).join(" · ");
     return root
-      .child(v_flex().flex_none().px(18).pt(14).pb(10).gap(4).border_b_1().border_color(t.border)
+      .child(v_flex().flex_none().px(20).pt(16).pb(12).gap(5).border_b_1().border_color(t.border)
         .child(h_flex().items_center().justify_between()
-          .child(div().text_size(14).font_semibold().child("Fleece"))
+          .child(h_flex().gap(8).items_center()
+            .child(div().text_size(15).font_semibold().child("Fleece"))
+            .when(d.pinned, (el) => el.child(this.status(true, t))))
           .child(div().text_size(11).text_color(t.dim).child(meta)))
-        .when(Boolean(turn.prompt), (el) => el.child(div().text_size(11.5).text_color(t.muted).truncate().child(`› ${turn.prompt.split("\n")[0]}`))))
-      .child(div().id("fleece-answer").flex_1().min_h(0).overflow_y_scrollbar().px(18).py(12)
+        .when(Boolean(turn.prompt), (el) => el.child(h_flex().gap(6).min_w(0).text_size(11.5)
+          .child(div().flex_none().text_color(t.accent).child("›"))
+          .child(div().flex_1().min_w(0).text_color(t.muted).truncate().child(turn.prompt.split("\n")[0])))))
+      .child(div().id("fleece-answer").flex_1().min_h(0).overflow_y_scrollbar().px(22).py(14)
         .child(TextView.markdown(`fleece-md-${turn.index}`, turn.text).selectable(true)))
       .when(this.armed === "relay-to", (el) => el.child(div().flex_none().px(18).py(6).border_t_1().border_color(t.border)
         .text_size(11).text_color(t.accent).truncate().child(this.relayHint())))
       .child(h_flex().flex_none().h(34).px(12).gap(2).items_center().border_t_1().border_color(t.border)
-        .child(this.button("x-copy", `${k["copy-answer"]} Copy`, t, (cx) => this.act(["copy", ...this.turnArgs()], cx)))
-        .child(this.button("x-code", "c Copy code", t, (cx) => this.act(["copy", "--code", ...this.turnArgs()], cx)))
-        .child(this.button("x-relay", `${k.relay} Relay`, t, (cx) => this.relayStart(turn.text, "answer", cx)))
-        .child(this.button("x-save", `${k.save} Save`, t, (cx) => this.act(["save", ...this.turnArgs()], cx)))
-        .child(this.button("x-dock", "d Dock", t, () => this.openDock()))
+        .child(this.keyButton("x-copy", k["copy-answer"], "Copy", t, (cx) => this.act(["copy", ...this.turnArgs()], cx)))
+        .child(this.keyButton("x-code", "c", "Copy code", t, (cx) => this.act(["copy", "--code", ...this.turnArgs()], cx)))
+        .child(this.keyButton("x-relay", k.relay, "Relay", t, (cx) => this.relayStart(turn.text, "answer", cx)))
+        .child(this.keyButton("x-save", k.save, "Save", t, (cx) => this.act(["save", ...this.turnArgs()], cx)))
+        .child(this.keyButton("x-dock", "d", "Dock", t, () => this.openDock()))
         .child(div().flex_1())
-        .child(this.button("x-older", `${k.older} Older`, t, (cx) => this.step(-1, cx)))
-        .child(this.button("x-newer", `Newer ${k.newer}`, t, (cx) => this.step(1, cx)))
+        .child(this.keyButton("x-older", k.older, "Older", t, (cx) => this.step(-1, cx)))
+        .child(this.keyButton("x-newer", k.newer, "Newer", t, (cx) => this.step(1, cx), true))
         .child(this.button("x-close", "Esc", t, () => closeOverlay(props().overlay))));
   }
 }
