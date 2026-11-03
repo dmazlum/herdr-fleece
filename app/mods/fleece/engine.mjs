@@ -1160,12 +1160,19 @@ async function copyToClipboard(text) {
   const osc52 = writeOsc52(text);
   return { tool, osc52 };
 }
+function clipboardEnv(env = process.env) {
+  const locale = env.LC_ALL || env.LC_CTYPE || env.LANG || "";
+  if (/utf-?8/i.test(locale)) return env;
+  const { LC_ALL: _unset, ...rest } = env;
+  return { ...rest, LC_CTYPE: "UTF-8", LANG: "en_US.UTF-8" };
+}
 async function copyWithTool(text) {
+  const env = clipboardEnv();
   for (const command of TOOLS[process.platform] ?? []) {
     const [bin, ...args] = command;
     if (!bin) continue;
     try {
-      const child = run2(bin, args);
+      const child = run2(bin, args, { env });
       child.child.stdin?.end(text);
       await child;
       return bin;
