@@ -26,12 +26,25 @@ export async function copyToClipboard(text: string): Promise<CopyResult> {
   return { tool, osc52 };
 }
 
+/**
+ * pbcopy decodes stdin by the locale, and falls back to MacRoman when none is
+ * set — which is how GUI apps and plugin hosts spawn us. Without this, "ç"
+ * lands on the clipboard as "√ß". The text is always UTF-8, so say so.
+ */
+export function clipboardEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const locale = env.LC_ALL || env.LC_CTYPE || env.LANG || "";
+  if (/utf-?8/i.test(locale)) return env;
+  const { LC_ALL: _unset, ...rest } = env;
+  return { ...rest, LC_CTYPE: "UTF-8", LANG: "en_US.UTF-8" };
+}
+
 async function copyWithTool(text: string): Promise<string | undefined> {
+  const env = clipboardEnv();
   for (const command of TOOLS[process.platform] ?? []) {
     const [bin, ...args] = command;
     if (!bin) continue;
     try {
-      const child = run(bin, args);
+      const child = run(bin, args, { env });
       child.child.stdin?.end(text);
       await child;
       return bin;
